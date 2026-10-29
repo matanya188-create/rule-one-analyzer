@@ -65,6 +65,20 @@ for (const f of files) {
     for (const [v, r] of [['book', book], ['capped', capped]]) {
       row[v] = { code: r.ok ? r.verdict.code : 'no-data', growth: r.ok && r.sticker.ok ? r.sticker.growth : null, ratio: r.ok && r.sticker.ok ? price / r.sticker.sticker : null };
     }
+    // "soft" Big Five, closer to the book's wording: each number is judged on its longest
+    // available window (10 years when there are 10); the 5/3/1-year windows are trend context.
+    // Wonderful = at least 4 of 5 at >= 10%.
+    const softPass = book.ok ? book.big5.filter((m) => { const w = m.windows.find((x) => x.value != null); return w && w.value >= 0.1; }).length : 0;
+    const softCode = (r) => {
+      if (!r.ok) return 'no-data';
+      if (book.big5.filter((m) => m.status === 'unknown').length >= 2) return 'no-price';
+      if (softPass < 4) return 'not-wonderful';
+      if (!r.sticker.ok) return 'no-price';
+      return price <= r.sticker.mos ? 'buy' : price <= r.sticker.sticker ? 'fair' : 'expensive';
+    };
+    for (const [v, r] of [['soft', book], ['softCapped', capped]]) {
+      row[v] = { code: softCode(r), growth: r.ok && r.sticker.ok ? r.sticker.growth : null, ratio: r.ok && r.sticker.ok ? price / r.sticker.sticker : null, b5: softPass };
+    }
     for (const h of HORIZONS) {
       const p1 = closeAt(monthly, y + h, 11), s0 = closeAt(spy, y, 11), s1 = closeAt(spy, y + h, 11);
       row[`r${h}`] = p1 != null ? p1 / price - 1 : null;
@@ -172,7 +186,9 @@ md += `| יקום | שורות חברה-שנה | חברות |\n|---|---|---|\n| 
 
 md += section('א. היקום הקפדני, נוסחת הספר כמו שהיא', strict, 'book', 'רק חברות שכבר היו ב-S&P 500 בתאריך הבדיקה. צמיחה = צמיחת ההון העצמי ההיסטורית בלי תקרה (כמו באתר היום).');
 md += section(`ב. היקום הקפדני, צמיחה מוגבלת ל-${CAP * 100}%`, strict, 'capped', `כמו א, אבל שיעור הצמיחה בנוסחת הסטיקר נחתך ב-${CAP * 100}% (ולכן גם המכפיל העתידי ≤ ${CAP * 200}). בודק אם האזהרה על "צמיחה גבוהה מאוד" צריכה להפוך לכלל.`);
-md += section('ג. כל 519 החברות, נוסחת הספר (הטיית-שורדים מלאה — להשוואה בלבד)', rows, 'book', 'כולל חברות שנכנסו למדדים אחרי תאריך הבדיקה, ולכן מנופח.');
+md += section('ג. היקום הקפדני, חמשת המספרים לפי החלון הארוך ביותר ("לפי הספר"), נוסחת הספר', strict, 'soft', 'כל מספר נבדק על החלון הארוך ביותר הזמין (10 שנים כשיש); חלונות 5/3/1 הם מגמה בלבד. "עסק נהדר" = לפחות 4 מתוך 5 מעל 10%. הסטיקר כמו בסעיף א.');
+md += section(`ד. היקום הקפדני, חמשת המספרים לפי החלון הארוך ביותר, צמיחה מוגבלת ל-${CAP * 100}%`, strict, 'softCapped', 'כמו ג, עם הסטיקר של סעיף ב.');
+md += section('ה. כל 519 החברות, נוסחת הספר (הטיית-שורדים מלאה — להשוואה בלבד)', rows, 'book', 'כולל חברות שנכנסו למדדים אחרי תאריך הבדיקה, ולכן מנופח.');
 
 mkdirSync(outDir, { recursive: true });
 writeFileSync(join(outDir, 'rows.json'), JSON.stringify(rows));

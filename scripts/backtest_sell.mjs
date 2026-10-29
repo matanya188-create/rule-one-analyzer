@@ -47,7 +47,7 @@ for (const [t, years] of byT) {
       if (k % 12 === 11) { // December: re-evaluate with the new filings
         const r2 = years.get(Math.floor(k / 12));
         if (r2) {
-          const stillGood = hold === 'tolerant' ? (r2.b5pass ?? 0) >= 3 : ['buy', 'fair', 'expensive'].includes(r2[v].code);
+          const stillGood = hold === 'tolerant' ? (r2[v].b5 ?? r2.b5pass ?? 0) >= 3 : ['buy', 'fair', 'expensive'].includes(r2[v].code);
           if (!stillGood) { exit = { k, price: c, reason: 'not-wonderful' }; break; }
           if (r2[v].ratio) sticker = r2.price / r2[v].ratio;
         }
