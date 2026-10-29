@@ -6,11 +6,15 @@ All Rule #1 calculations run in the browser (public/rule1.js).
 Run:  python server.py   then open http://127.0.0.1:8765
 """
 import gzip
+import hmac
 import json
 import re
+import secrets
 import sys
+import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -47,6 +51,43 @@ def load_config():
     if CONFIG_FILE.exists():
         return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
     return {}
+
+
+def access_key():
+    """Secret that gates the whole site. Generated once into config.local.json."""
+    cfg = load_config()
+    if len(cfg.get("access_key", "")) < 24:
+        cfg["access_key"] = secrets.token_urlsafe(24)
+        CONFIG_FILE.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    return cfg["access_key"]
+
+
+ACCESS_KEY = access_key()
+COOKIE = "r1k"
+COOKIE_MAX_AGE = 90 * 86400
+
+
+class RateLimiter:
+    """Fixed one-minute window, process-wide (the site has a single owner)."""
+
+    def __init__(self, per_minute):
+        self.per_minute = per_minute
+        self.window = 0
+        self.count = 0
+        self.lock = threading.Lock()
+
+    def allow(self):
+        with self.lock:
+            now = int(time.time() // 60)
+            if now != self.window:
+                self.window, self.count = now, 0
+            self.count += 1
+            return self.count <= self.per_minute
+
+
+API_LIMIT = RateLimiter(60)
+BAD_KEY_LIMIT = RateLimiter(10)
+KEY_IN_URL = re.compile(r"([?&]k=)[^&\s]*")
 
 
 def sec_user_agent():
@@ -150,11 +191,64 @@ def prices(ticker):
     return cached(f"px_{ticker}", 15 * 60, produce)
 
 
+LOCKED_PAGE = """<!doctype html><html lang="he" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>גישה נעולה</title></head>
+<body style="font-family:system-ui,sans-serif;padding:40px 16px;text-align:center">
+<h1>גישה נעולה</h1><p>האתר פרטי. יש להיכנס דרך הקישור האישי.</p></body></html>""".encode("utf-8")
+
+
 class Handler(SimpleHTTPRequestHandler):
+    server_version = "r1"
+    sys_version = ""
+
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=str(PUBLIC), **kw)
 
+    def list_directory(self, path):  # never expose directory listings
+        self.send_error(404)
+        return None
+
+    def authorized(self):
+        """Cookie holds the key; ?k=KEY once sets the cookie and redirects to a clean URL."""
+        jar = self.headers.get("Cookie") or ""
+        for part in jar.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == COOKIE and hmac.compare_digest(value, ACCESS_KEY):
+                return True
+        url = urllib.parse.urlsplit(self.path)
+        given = urllib.parse.parse_qs(url.query).get("k", [""])[0]
+        if given:
+            if not BAD_KEY_LIMIT.allow() and not hmac.compare_digest(given, ACCESS_KEY):
+                self.send_locked(429)
+                return False
+            if hmac.compare_digest(given, ACCESS_KEY):
+                self.send_response(302)
+                self.send_header("Set-Cookie", f"{COOKIE}={ACCESS_KEY}; Max-Age={COOKIE_MAX_AGE}; Path=/; HttpOnly; Secure; SameSite=Lax")
+                self.send_header("Location", url.path or "/")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return False
+        if url.path.startswith("/api/"):
+            self.send_json(401, {"error": "נדרשת כניסה דרך הקישור האישי"})
+        else:
+            self.send_locked(401)
+        return False
+
+    def send_locked(self, status):
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(LOCKED_PAGE)))
+        self.end_headers()
+        self.wfile.write(LOCKED_PAGE)
+
+    def do_HEAD(self):
+        if self.authorized():
+            super().do_HEAD()
+
     def end_headers(self):
+        self.send_header("Strict-Transport-Security", "max-age=31536000")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Content-Security-Policy",
@@ -177,11 +271,15 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if not self.authorized():
+            return
         m = re.match(r"^/api/(company|prices)/([^/?#]+)$", self.path.split("?")[0])
         if not m:
             if self.path.startswith("/api/"):
                 return self.send_json(404, {"error": "לא קיים"})
             return super().do_GET()
+        if not API_LIMIT.allow():
+            return self.send_json(429, {"error": "יותר מדי בקשות — נסה שוב בעוד דקה"})
         ticker = m.group(2).upper()
         if not TICKER_RE.match(ticker):
             return self.send_json(400, {"error": "סימול לא תקין"})
@@ -195,7 +293,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json(500, {"error": "שגיאה פנימית"})
 
     def log_message(self, fmt, *args):
-        sys.stderr.write("%s %s\n" % (self.log_date_time_string(), fmt % args))
+        line = KEY_IN_URL.sub(r"\1***", fmt % args)  # never write the access key to logs
+        sys.stderr.write("%s %s\n" % (self.log_date_time_string(), line))
 
 
 if __name__ == "__main__":
