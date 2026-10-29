@@ -44,14 +44,15 @@ async function loadUniverse() {
     const dl = document.getElementById('tlist');
     dl.innerHTML = universe.tickers.map((x) => `<option value="${esc(x.t)}">${esc(x.n)}</option>`).join('');
     const when = new Date(universe.builtAt * 1000).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' });
-    $('#coverage').textContent = `${universe.tickers.length} מניות מ-S&P 500 ומ-Nasdaq-100 · הנתונים עודכנו ב-${when}`;
+    const extra = universe.tickers.filter((x) => x.i.includes('extra')).length;
+    $('#coverage').textContent = `${universe.tickers.length} מניות: S&P 500, Nasdaq-100${extra ? ` ועוד ${extra} שהוספת` : ''} · הנתונים עודכנו ב-${when}`;
   } catch { /* the search still works without suggestions */ }
 }
 
 async function fetchStock(t) {
   if (!STATIC) return Promise.all([getJson(`/api/company/${t}`), getJson(`/api/prices/${t}`)]);
   const r = await fetch(`data/${encodeURIComponent(t)}.json`);
-  if (r.status === 404) throw new Error(`המניה ${t} לא נמצאת ברשימה (S&P 500 ו-Nasdaq-100).`);
+  if (r.status === 404) throw new Error(`המניה ${t} עוד לא ברשימה. האתר מכסה את S&P 500, את Nasdaq-100 ומניות שביקשת להוסיף. בקש מקלוד להוסיף אותה, והיא תופיע אחרי הבנייה הבאה.`);
   if (!r.ok) throw new Error(`שגיאה ${r.status}`);
   const j = await r.json();
   return [j.company, j.prices];

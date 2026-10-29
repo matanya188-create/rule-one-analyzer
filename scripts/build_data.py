@@ -25,6 +25,7 @@ INDEX_PAGES = {
     "nasdaq100": "https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies",
 }
 FALLBACK_LIST = Path(__file__).resolve().parent / "tickers_fallback.json"
+EXTRA_LIST = Path(__file__).resolve().parent / "extra_tickers.json"  # tickers Matanya asked for by name
 
 
 class TablesParser(HTMLParser):
@@ -144,6 +145,7 @@ def main():
         lists = {"custom": only}
     else:
         lists = load_universe()
+        lists["extra"] = [t.upper() for t in json.loads(EXTRA_LIST.read_text(encoding="utf-8"))]
     membership = {}
     for name, ts in lists.items():
         for t in ts:
