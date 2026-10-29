@@ -1,0 +1,6 @@
+{
+  "name": "rule-one-analyzer",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test tests/rule1.test.mjs" }
+}
