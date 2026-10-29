@@ -333,8 +333,11 @@ export function townTools(daily) {
 }
 
 // ---------- Full analysis + verdict ----------
-export function analyze({ facts, splits, monthly, daily, price, analystGrowth = null, growthOverride = null, peOverride = null, marr = DEFAULTS.marr }) {
-  const rows = buildYears(facts, splits).filter((r) => r.fy >= new Date().getFullYear() - 12);
+// asOf (optional ISO date): point-in-time mode for the backtest — the caller has already
+// stripped facts/prices filed after that date; this only anchors the 12-year window.
+export function analyze({ facts, splits, monthly, daily, price, analystGrowth = null, growthOverride = null, peOverride = null, marr = DEFAULTS.marr, asOf = null }) {
+  const nowYear = (asOf ? new Date(asOf) : new Date()).getFullYear();
+  const rows = buildYears(facts, splits).filter((r) => r.fy >= nowYear - 12);
   if (rows.length < 2) return { ok: false, reason: 'אין מספיק דוחות שנתיים (10-K) לחברה הזו ב-SEC' };
   const last = rows[rows.length - 1];
   const big5 = bigFive(rows);

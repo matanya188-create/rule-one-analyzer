@@ -3,3 +3,4 @@ config.local.json
 __pycache__/
 tests/_*
 scripts/__pycache__/
+research/backtest/rows.json
