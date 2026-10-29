@@ -3,6 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; style-src-attr 'unsafe-inline'; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; object-src 'none'">
+  <meta name="referrer" content="no-referrer">
   <title>מנתח Rule #1</title>
   <meta name="description" content="ניתוח מניה לפי כללי הספר Rule #1 של פיל טאון">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -15,9 +17,11 @@
       <h1>מנתח <span class="ltr">Rule #1</span></h1>
       <p class="sub">הזן סימול של מניה אמריקאית וקבל תשובה לפי כללי הספר של פיל טאון: האם זה עסק נהדר, ומה המחיר שבו כדאי לקנות.</p>
       <form id="form" class="search" autocomplete="off">
-        <input id="ticker" name="ticker" placeholder="למשל MSFT" maxlength="10" spellcheck="false" dir="ltr" aria-label="סימול מניה" required>
+        <input id="ticker" name="ticker" placeholder="למשל MSFT" maxlength="10" spellcheck="false" dir="ltr" aria-label="סימול מניה" list="tlist" autocapitalize="characters" required>
         <button type="submit">נתח</button>
+        <datalist id="tlist"></datalist>
       </form>
+      <p id="coverage" class="note"></p>
     </div>
   </header>
 

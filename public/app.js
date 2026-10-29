@@ -27,18 +27,42 @@ async function getJson(url) {
 
 $('#form').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const t = $('#ticker').value.trim().toUpperCase();
+  const t = $('#ticker').value.trim().toUpperCase().replace(/-/g, '.');
   if (!/^[A-Z][A-Z0-9.\-]{0,9}$/.test(t)) { showError('סימול לא תקין'); return; }
   history.replaceState(null, '', `#${t}`);
   await load(t);
 });
 
+// Local server = live /api; anywhere else (GitHub Pages) = nightly static files under data/.
+const STATIC = !['127.0.0.1', 'localhost'].includes(location.hostname);
+let universe = null;
+
+async function loadUniverse() {
+  if (!STATIC) return;
+  try {
+    universe = await getJson('data/index.json');
+    const dl = document.getElementById('tlist');
+    dl.innerHTML = universe.tickers.map((x) => `<option value="${esc(x.t)}">${esc(x.n)}</option>`).join('');
+    const when = new Date(universe.builtAt * 1000).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' });
+    $('#coverage').textContent = `${universe.tickers.length} מניות מ-S&P 500 ומ-Nasdaq-100 · הנתונים עודכנו ב-${when}`;
+  } catch { /* the search still works without suggestions */ }
+}
+
+async function fetchStock(t) {
+  if (!STATIC) return Promise.all([getJson(`/api/company/${t}`), getJson(`/api/prices/${t}`)]);
+  const r = await fetch(`data/${encodeURIComponent(t)}.json`);
+  if (r.status === 404) throw new Error(`המניה ${t} לא נמצאת ברשימה (S&P 500 ו-Nasdaq-100).`);
+  if (!r.ok) throw new Error(`שגיאה ${r.status}`);
+  const j = await r.json();
+  return [j.company, j.prices];
+}
+
 async function load(t) {
   const btn = $('#form button');
   btn.disabled = true;
-  out.innerHTML = `<div class="card loading">מושך דוחות מה-SEC ומחירים עבור <b class="ltr">${esc(t)}</b>…</div>`;
+  out.innerHTML = `<div class="card loading">טוען דוחות ומחירים עבור <b class="ltr">${esc(t)}</b>…</div>`;
   try {
-    const [company, prices] = await Promise.all([getJson(`/api/company/${t}`), getJson(`/api/prices/${t}`)]);
+    const [company, prices] = await fetchStock(t);
     state.company = company; state.prices = prices;
     state.params = { analyst: '', growth: '', pe: '', marr: '15' };
     render();
@@ -83,7 +107,7 @@ function verdictCard(a, c, p) {
   ];
   return `<section class="card verdict v-${a.verdict.code}">
     <div class="row"><div><div class="name">${esc(c.name)} <span class="tk ltr">${esc(c.ticker)}</span></div>
-    <div class="muted">${esc(p.exchange || '')} · דוח שנתי אחרון: ${esc(a.last.end || a.last.fy)}</div></div></div>
+    <div class="muted">${esc(p.exchange || '')} · דוח שנתי אחרון: ${esc(a.last.end || a.last.fy)}${p.asOf ? ` · מחיר נכון ל-${esc(new Date(p.asOf * 1000).toLocaleDateString('he-IL'))}` : ''}</div></div></div>
     <div class="badge">${esc(a.verdict.title)}</div>
     <div>${bidi(a.verdict.text)}</div>
     ${s.ok ? priceBar(a.price, s.mos, s.sticker) : ''}
@@ -110,7 +134,7 @@ function bigFiveCard(a) {
     <td><span class="cell ${st[m.status][0]}">${st[m.status][1]}</span></td></tr>`).join('');
   return `<section class="card"><h2>חמשת המספרים הגדולים</h2>
     <p class="muted" style="margin-top:-6px">כל מספר צריך להיות לפחות 10%, ובעקביות לאורך כל התקופות. עקביות כזאת מעידה שיש לעסק חפיר.</p>
-    <div class="scroll"><table>${head}${rows}</table></div>
+    <div class="scroll"><table class="bf">${head}${rows}</table></div>
     <p class="note">צמיחה = קצב שנתי ממוצע (CAGR) מהשנה הבסיסית עד הדוח האחרון. ROIC = רווח תפעולי אחרי מס חלקי (הון עצמי + חוב לטווח ארוך). כשיש ערך שלילי בתחילת התקופה או בסופה אין צמיחה, והתא מסומן "שלילי" באדום. תא אפור = אין מספיק היסטוריה.</p>
   </section>`;
 }
@@ -189,5 +213,6 @@ function bindParams() {
   }
 }
 
-const fromHash = decodeURIComponent(location.hash.slice(1)).toUpperCase();
+loadUniverse();
+const fromHash = decodeURIComponent(location.hash.slice(1)).toUpperCase().replace(/-/g, '.');
 if (/^[A-Z][A-Z0-9.\-]{0,9}$/.test(fromHash)) { $('#ticker').value = fromHash; load(fromHash); }

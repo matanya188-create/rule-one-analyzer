@@ -8,6 +8,7 @@ Run:  python server.py   then open http://127.0.0.1:8765
 import gzip
 import hmac
 import json
+import os
 import re
 import secrets
 import sys
@@ -62,7 +63,7 @@ def access_key():
     return cfg["access_key"]
 
 
-ACCESS_KEY = access_key()
+ACCESS_KEY = None  # set in __main__ so importing this module (nightly build) has no side effects
 COOKIE = "r1k"
 COOKIE_MAX_AGE = 90 * 86400
 
@@ -91,7 +92,7 @@ KEY_IN_URL = re.compile(r"([?&]k=)[^&\s]*")
 
 
 def sec_user_agent():
-    email = load_config().get("sec_contact_email", "").strip()
+    email = (os.environ.get("SEC_CONTACT_EMAIL") or load_config().get("sec_contact_email", "")).strip()
     if not email:
         raise ApiError(500, "חסר מייל-קשר ל-SEC בקובץ config.local.json (sec_contact_email)")
     return f"RuleOneAnalyzer/0.1 {email}"
@@ -298,5 +299,6 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"Rule #1 Analyzer: http://{HOST}:{PORT}")
+    ACCESS_KEY = access_key()
+    print(f"Rule #1 Analyzer: http://{HOST}:{PORT}/?k=<access_key from config.local.json>")
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
