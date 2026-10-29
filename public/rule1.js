@@ -42,11 +42,21 @@ export function splitFactorAfter(filedIso, splits) {
   return f;
 }
 
+// Some filers tag a few stray rows in an odd unit (e.g. Coca-Cola EPS in "pure"),
+// so pick the unit the metric should have, else the one with the most rows.
+const UNIT_FOR = { eps: 'USD/shares', shares: 'shares' };
+export function pickUnit(node, metric) {
+  const units = node?.units || {};
+  const want = UNIT_FOR[metric] || 'USD';
+  if (units[want]) return want;
+  return Object.keys(units).sort((a, b) => units[b].length - units[a].length)[0];
+}
+
 // One concept -> Map(fiscalYear -> {value, end, filed}), latest filing wins per period end.
 function conceptAnnual(facts, concept, metric, splits) {
   const node = facts?.[concept];
   if (!node) return new Map();
-  const unitKey = Object.keys(node.units || {})[0];
+  const unitKey = pickUnit(node, metric);
   if (!unitKey) return new Map();
   const byEnd = new Map();
   for (const x of node.units[unitKey]) {
@@ -67,7 +77,7 @@ function conceptAnnual(facts, concept, metric, splits) {
     if (metric === 'shares') v = v * f;
     const fy = Number(x.end.slice(0, 4));
     const prev = byYear.get(fy);
-    if (!prev || x.end > prev.end) byYear.set(fy, { value: v, end: x.end, filed: x.filed, concept });
+    if (!prev || x.end > prev.end) byYear.set(fy, { value: v, start: x.start, end: x.end, filed: x.filed, concept });
   }
   return byYear;
 }
@@ -82,6 +92,48 @@ export function annualSeries(facts, metric, splits) {
 }
 
 const val = (m, fy) => (m.has(fy) ? m.get(fy).value : null);
+
+// ---------- Trailing twelve months (TTM) ----------
+// TTM = last annual + current fiscal-year-to-date (10-Q) - same period one year earlier.
+const QUARTERLY_FORMS = new Set(['10-Q', '10-Q/A']);
+const near = (a, b, days = 10) => Math.abs(a - b) <= days * DAY;
+
+function durationRows(facts, concept, metric, splits) {
+  const node = facts?.[concept];
+  const unitKey = node && pickUnit(node, metric);
+  if (!unitKey) return [];
+  const byPeriod = new Map();
+  for (const x of node.units[unitKey]) {
+    if (!x.start || !(QUARTERLY_FORMS.has(x.form) || ANNUAL_FORMS.has(x.form))) continue;
+    const key = `${x.start}|${x.end}`;
+    const prev = byPeriod.get(key);
+    if (!prev || x.filed > prev.filed) byPeriod.set(key, x);
+  }
+  return [...byPeriod.values()].map((x) => {
+    const f = splitFactorAfter(x.filed, splits);
+    const value = metric === 'eps' ? x.val / f : metric === 'shares' ? x.val * f : x.val;
+    return { start: x.start, end: x.end, value, s: Date.parse(x.start), e: Date.parse(x.end) };
+  });
+}
+
+// annual: the {value, start, end, concept} entry of the latest fiscal year.
+export function ttmValue(facts, metric, splits, annual) {
+  const base = { value: annual?.value ?? null, quarters: 0, asOf: annual?.end ?? null };
+  if (!annual?.start || !annual.concept) return base;
+  const rows = durationRows(facts, annual.concept, metric, splits);
+  const fyEnd = Date.parse(annual.end), fyStart = Date.parse(annual.start);
+  const ytd = rows.filter((r) => near(r.s, fyEnd + DAY) && r.e > fyEnd).sort((a, b) => b.e - a.e)[0];
+  if (!ytd) return base;
+  const len = ytd.e - ytd.s;
+  const prior = rows.find((r) => near(r.s, fyStart) && near(r.e - r.s, len));
+  if (!prior) return { ...base, note: 'חסר רבעון מקביל אשתקד — נלקח הדוח השנתי' };
+  return {
+    value: annual.value + ytd.value - prior.value,
+    quarters: Math.round(len / (91.3 * DAY)),
+    asOf: ytd.end,
+    parts: { annual: annual.value, ytd: ytd.value, prior: prior.value },
+  };
+}
 
 // Build the yearly table used by every rule.
 export function buildYears(facts, splits) {
@@ -290,7 +342,10 @@ export function analyze({ facts, splits, monthly, daily, price, analystGrowth = 
   const growth = growthOverride != null && Number.isFinite(growthOverride)
     ? { source: 'הוזן ידנית', value: growthOverride }
     : ruleGrowth(big5, analystGrowth);
-  const sticker = stickerPrice({ eps: last.eps, growth: growth?.value, historicalPe: hpe.average, peOverride, marr });
+  // Town values the business on trailing-twelve-month EPS, not just the last annual report.
+  const epsAnnual = annualSeries(facts, 'eps', splits).get(last.fy);
+  const ttm = epsAnnual ? ttmValue(facts, 'eps', splits, epsAnnual) : { value: last.eps, quarters: 0, asOf: last.end };
+  const sticker = stickerPrice({ eps: ttm.value, growth: growth?.value, historicalPe: hpe.average, peOverride, marr });
   const fcfPs = last.fcf != null && last.shares ? last.fcf / last.shares : null;
   const payback = paybackYears(price, fcfPs, growth?.value);
   const debtYears = last.ltDebt != null && last.fcf > 0 ? last.ltDebt / last.fcf : null;
@@ -300,8 +355,11 @@ export function analyze({ facts, splits, monthly, daily, price, analystGrowth = 
   const b5fail = big5.filter((m) => m.status === 'fail').length;
   const wonderful = b5pass >= 4 && b5fail === 0;
 
+  const b5unknown = big5.filter((m) => m.status === 'unknown').length;
+
   let verdict;
-  if (!wonderful) verdict = { code: 'not-wonderful', title: 'לא עומדת בכללי הספר', text: `רק ${b5pass} מתוך 5 המספרים הגדולים עוברים את רף ה-10% בעקביות. לפי טאון — אם העסק לא נהדר, המחיר לא משנה.` };
+  if (b5unknown >= 2) verdict = { code: 'no-price', title: 'אין מספיק נתונים לפסיקה', text: `${b5unknown} מתוך 5 המספרים הגדולים חסרים, כי החברה לא מדווחת אותם בפורמט הסטנדרטי של ה-SEC (למשל רווח למניה). אי אפשר לבדוק אותה לפי הספר בכלי הזה.` };
+  else if (!wonderful) verdict = { code: 'not-wonderful', title: 'לא עומדת בכללי הספר', text: `רק ${b5pass} מתוך 5 המספרים הגדולים עוברים את רף ה-10% בעקביות. לפי טאון — אם העסק לא נהדר, המחיר לא משנה.` };
   else if (!sticker.ok) verdict = { code: 'no-price', title: 'עסק טוב — אבל אי אפשר לתמחר', text: sticker.reason };
   else if (price <= sticker.mos) verdict = { code: 'buy', title: 'זולה — שווה קנייה לפי הספר', text: `המחיר ${fmtUsd(price)} נמוך ממחיר מרווח-הביטחון ${fmtUsd(sticker.mos)}.` + (sticker.growth > 0.2 ? ' שים לב: התוצאה נשענת על צמיחה גבוהה מאוד (ראה אזהרות).' : '') };
   else if (price <= sticker.sticker) verdict = { code: 'fair', title: 'מחיר הוגן — אין מרווח ביטחון', text: `המחיר מתחת לשווי (${fmtUsd(sticker.sticker)}) אבל מעל מחיר הקנייה (${fmtUsd(sticker.mos)}). לפי הספר — מחכים.` };
@@ -312,7 +370,7 @@ export function analyze({ facts, splits, monthly, daily, price, analystGrowth = 
   if (sticker.ok && sticker.futurePe > 50) warnings.push(`המכפיל העתידי ${sticker.futurePe.toFixed(1)} גבוה מאוד, ולכן המחיר העתידי אופטימי.`);
   if (hpe.points.length < 5) warnings.push('יש פחות מ-5 שנים לחישוב המכפיל ההיסטורי.');
   if (rows.length < 11) warnings.push(`יש רק ${rows.length} דוחות שנתיים, כך שבדיקת 10 השנים לא שלמה.`);
-  return { ok: true, rows, last, big5, b5pass, hpe, growth, sticker, fcfPs, payback, debtYears, tech, verdict, price, warnings };
+  return { ok: true, rows, last, big5, b5pass, hpe, growth, ttm, sticker, fcfPs, payback, debtYears, tech, verdict, price, warnings };
 }
 
 export function fmtUsd(v) {

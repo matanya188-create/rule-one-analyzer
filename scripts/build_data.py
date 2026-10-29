@@ -97,17 +97,26 @@ def load_universe():
     return lists
 
 
+TTM_CONCEPTS = {"EarningsPerShareDiluted", "EarningsPerShareBasicAndDiluted", "EarningsPerShareBasic"}
+
+
 def compact_facts(facts):
-    """Keep only annual 10-K rows from the last ~14 years with the fields the engine reads."""
-    cutoff = f"{time.gmtime().tm_year - 14}-01-01"
+    """Keep annual 10-K rows from the last ~14 years, plus recent 10-Q EPS rows for TTM."""
+    year = time.gmtime().tm_year
+    cutoff, q_cutoff = f"{year - 14}-01-01", f"{year - 3}-01-01"
+
+    def wanted(concept, r):
+        if r.get("form") in ("10-K", "10-K/A", "10-KT"):
+            return r.get("end", "") >= cutoff  # fp is not always "FY" on comparative rows the TTM needs
+        return concept in TTM_CONCEPTS and r.get("form") in ("10-Q", "10-Q/A") and r.get("end", "") >= q_cutoff
+
     out = {}
     for concept, node in facts.items():
         units = {}
         for unit, rows in node["units"].items():
             keep = [
                 {k: r[k] for k in ("start", "end", "val", "filed", "form", "fp") if k in r}
-                for r in rows
-                if r.get("form") in ("10-K", "10-K/A", "10-KT") and r.get("fp") == "FY" and r.get("end", "") >= cutoff
+                for r in rows if wanted(concept, r)
             ]
             if keep:
                 units[unit] = keep

@@ -100,3 +100,48 @@ test('sma / ema basics', () => {
   assert.equal(e[3], 3);   // 4*0.5 + 2*0.5
   assert.equal(e[4], 4);
 });
+
+test('TTM EPS = annual + current YTD - prior-year YTD (Apple FY2025 + 9M FY2026)', async () => {
+  const { ttmValue } = await import('../public/rule1.js');
+  const q = (form, start, end, val, filed) => ({ form, fp: form === '10-K' ? 'FY' : 'Q3', start, end, val, filed });
+  const facts = { EarningsPerShareDiluted: { units: { 'USD/shares': [
+    q('10-K', '2024-09-29', '2025-09-27', 7.46, '2025-10-31'),
+    q('10-Q', '2024-09-29', '2025-06-28', 5.62, '2026-07-31'),
+    q('10-Q', '2025-03-30', '2025-06-28', 1.57, '2026-07-31'),
+    q('10-Q', '2025-09-28', '2026-06-27', 6.88, '2026-07-31'),
+    q('10-Q', '2026-03-29', '2026-06-27', 2.02, '2026-07-31'),
+  ] } } };
+  const annual = { value: 7.46, start: '2024-09-29', end: '2025-09-27', concept: 'EarningsPerShareDiluted' };
+  const t = ttmValue(facts, 'eps', [], annual);
+  close(t.value, 8.72, 1e-9);
+  assert.equal(t.quarters, 3);
+  assert.equal(t.asOf, '2026-06-27');
+});
+
+test('TTM falls back to the annual value when no newer 10-Q exists', async () => {
+  const { ttmValue } = await import('../public/rule1.js');
+  const annual = { value: 5, start: '2025-01-01', end: '2025-12-31', concept: 'EarningsPerShareDiluted' };
+  const facts = { EarningsPerShareDiluted: { units: { 'USD/shares': [
+    { form: '10-K', fp: 'FY', start: '2025-01-01', end: '2025-12-31', val: 5, filed: '2026-02-01' }] } } };
+  const t = ttmValue(facts, 'eps', [], annual);
+  assert.equal(t.value, 5);
+  assert.equal(t.quarters, 0);
+});
+
+test('TTM split-adjusts each piece by its own filing date', async () => {
+  const { ttmValue } = await import('../public/rule1.js');
+  const splits = [{ date: Date.parse('2026-03-01') / 1000, ratio: 2 }];
+  const facts = { EarningsPerShareDiluted: { units: { 'USD/shares': [
+    { form: '10-Q', fp: 'Q1', start: '2025-01-01', end: '2025-03-31', val: 2, filed: '2025-05-01' },   // pre-split -> 1
+    { form: '10-Q', fp: 'Q1', start: '2026-01-01', end: '2026-03-31', val: 1.5, filed: '2026-05-01' }, // post-split
+  ] } } };
+  const annual = { value: 4, start: '2025-01-01', end: '2025-12-31', concept: 'EarningsPerShareDiluted' }; // already adjusted
+  close(ttmValue(facts, 'eps', splits, annual).value, 4 + 1.5 - 1);
+});
+
+test('pickUnit prefers the metric unit over stray units (Coca-Cola "pure")', async () => {
+  const { pickUnit } = await import('../public/rule1.js');
+  assert.equal(pickUnit({ units: { pure: [1], 'USD/shares': [1, 2] } }, 'eps'), 'USD/shares');
+  assert.equal(pickUnit({ units: { pure: [1], USD: [1] } }, 'revenue'), 'USD');
+  assert.equal(pickUnit({ units: { EUR: [1, 2], pure: [1] } }, 'revenue'), 'EUR');
+});

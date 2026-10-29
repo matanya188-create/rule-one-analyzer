@@ -150,7 +150,10 @@ function stickerCard(a) {
   if (!s.ok) return `<section class="card"><h2>מחיר הסטיקר</h2><p>${esc(s.reason)}</p>
     <p class="note">אפשר להזין צמיחה ידנית כדי לראות מה היה המחיר בהנחה אחרת.</p>${params}</section>`;
   const steps = [
-    ['רווח למניה אחרון (EPS)', `$${num(s.eps)}`, `דוח שנתי ${a.last.fy}`],
+    a.ttm.quarters > 0
+      ? ['רווח למניה ב-12 החודשים האחרונים (TTM)', `$${num(s.eps)}`,
+        `דוח שנתי ${a.last.fy} ($${num(a.ttm.parts.annual)}) + ${a.ttm.quarters} רבעונים ($${num(a.ttm.parts.ytd)}) − אותם רבעונים אשתקד ($${num(a.ttm.parts.prior)}). נכון ל-${a.ttm.asOf}`]
+      : ['רווח למניה אחרון (EPS)', `$${num(s.eps)}`, a.ttm.note || `דוח שנתי ${a.last.fy}. עוד אין דוח רבעוני חדש יותר`],
     ['שיעור צמיחה לפי הספר', pct(s.growth), a.growth?.source],
     [`רווח למניה בעוד ${s.years} שנים`, `$${num(s.futureEps)}`, `EPS × (1 + צמיחה)^${s.years}`],
     ['מכפיל עתידי', num(s.futurePe, 1), `${s.peSource}. פי 2 מהצמיחה = ${num(s.defaultPe, 1)}, היסטורי = ${num(a.hpe.average, 1)}`],
