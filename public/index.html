@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; style-src-attr 'unsafe-inline'; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; object-src 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://s3.tradingview.com; frame-src https://www.tradingview-widget.com https://s.tradingview.com https://www.tradingview.com; style-src 'self' https://fonts.googleapis.com; style-src-attr 'unsafe-inline'; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; object-src 'none'">
   <meta name="referrer" content="no-referrer">
   <title>מנתח Rule #1</title>
   <meta name="description" content="ניתוח מניה לפי כללי הספר Rule #1 של פיל טאון">
@@ -37,6 +37,8 @@
       <p class="muted">הנתונים מגיעים מהדוחות השנתיים (10-K) ב-SEC ומהמחירים ב-Yahoo. זה כלי עזר ללמידה, לא ייעוץ השקעות.</p>
     </section>
   </main>
+
+  <div class="wrap" id="charts"></div>
 
   <footer class="wrap muted foot">מבוסס על Rule #1 ו-Payback Time של פיל טאון. כל החישובים שקופים, ואפשר לשנות כל הנחה.</footer>
   <script type="module" src="app.js"></script>

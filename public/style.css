@@ -92,3 +92,4 @@ details summary { cursor: pointer; font-weight: 700; }
   .cell { min-width: 0; padding: 2px 4px; font-size: 12px; }
   .bf td:first-child { font-size: 13px; }
 }
+.tvbox { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin-bottom: 18px; }

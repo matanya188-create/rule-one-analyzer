@@ -66,7 +66,9 @@ async function load(t) {
     state.company = company; state.prices = prices;
     state.params = { analyst: '', growth: '', pe: '', marr: '15' };
     render();
+    renderCharts(company.ticker, prices.exchange);
   } catch (err) {
+    charts.innerHTML = '';
     showError(err.message);
   } finally {
     btn.disabled = false;
@@ -75,6 +77,64 @@ async function load(t) {
 
 function showError(msg) {
   out.innerHTML = `<div class="card err">${esc(msg)}</div>`;
+}
+
+// ---------- Live TradingView charts (official embed widget) ----------
+// Rendered once per ticker, outside #out, so editing an assumption does not reload them.
+const charts = document.getElementById('charts');
+const TV_SCRIPT = 'https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js';
+
+function tvSymbol(ticker, exchange) {
+  const ex = String(exchange || '');
+  const prefix = /nasdaq/i.test(ex) ? 'NASDAQ' : /american|arca/i.test(ex) ? 'AMEX' : /nyse/i.test(ex) ? 'NYSE' : '';
+  return prefix ? `${prefix}:${ticker}` : ticker;
+}
+
+const CHARTS = [
+  {
+    title: 'גרף יומי עם שלושת הכלים של טאון',
+    note: 'ממוצע נע 10 ימים על המחיר, MACD (8,17,9) וסטוכסטיק (14,5). כמו בכרטיס "שלושת הכלים" למעלה, רק על הגרף עצמו.',
+    interval: 'D', range: '6M',
+    studies: [
+      { id: 'MASimple@tv-basicstudies', inputs: { length: 10 } },
+      { id: 'MACD@tv-basicstudies', inputs: { fastLength: 8, slowLength: 17, signalLength: 9 } },
+      { id: 'Stochastic@tv-basicstudies', inputs: { length: 14, smoothD: 5 } },
+    ],
+  },
+  {
+    title: 'גרף שבועי לטווח ארוך',
+    note: 'חמש שנים של נרות שבועיים עם ממוצעים נעים 50 ו-200 ו-RSI (14), כדי לראות את המגמה הגדולה.',
+    interval: 'W', range: '60M',
+    studies: [
+      { id: 'MASimple@tv-basicstudies', inputs: { length: 50 } },
+      { id: 'MASimple@tv-basicstudies', inputs: { length: 200 } },
+      { id: 'RSI@tv-basicstudies', inputs: { length: 14 } },
+    ],
+  },
+];
+
+function renderCharts(ticker, exchange) {
+  const symbol = tvSymbol(ticker, exchange);
+  const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+  const height = innerWidth < 640 ? 520 : 640;
+  charts.innerHTML = `<section class="card"><h2>גרפים חיים מ-TradingView</h2>
+    <p class="muted" style="margin-top:-6px">הגרפים חיים: אפשר להזיז, להגדיל ולהוסיף כלים. הסימול: <bdi>${esc(symbol)}</bdi>.</p>
+    ${CHARTS.map((c, i) => `<h3>${esc(c.title)}</h3><p class="note" style="margin:0 0 8px">${esc(c.note)}</p>
+      <div class="tvbox"><div class="tradingview-widget-container" id="tv${i}"><div class="tradingview-widget-container__widget"></div></div></div>`).join('')}
+  </section>`;
+  CHARTS.forEach((c, i) => {
+    const s = document.createElement('script');
+    s.src = TV_SCRIPT;
+    s.async = true;
+    // The widget reads its JSON config from the script element's text.
+    s.textContent = JSON.stringify({
+      symbol, interval: c.interval, range: c.range, timezone: 'America/New_York',
+      theme: dark ? 'dark' : 'light', style: '1', locale: 'he_IL',
+      width: '100%', height, allow_symbol_change: false, calendar: false,
+      hide_volume: false, support_host: 'https://www.tradingview.com', studies: c.studies,
+    });
+    document.getElementById(`tv${i}`).appendChild(s);
+  });
 }
 
 function run() {
