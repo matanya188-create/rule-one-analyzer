@@ -9,17 +9,23 @@ export const DEFAULTS = {
   paybackMaxYears: 8,  // Payback Time rule
   debtMaxYearsFcf: 3,  // long-term debt payable from ~3 years of FCF
   fallbackTaxRate: 0.21,
+  growthCap: 0.15,     // Rule One calculator: "never over 15%"
+  peCap: 50,           // Town: "Don't exceed 50 in any case"
+  tenCapMultiple: 10,  // Ten Cap: pay at most 10x owner/free cash flow
 };
 
 // XBRL concepts, in priority order per metric.
 export const CONCEPTS = {
   revenue: ['RevenueFromContractWithCustomerExcludingAssessedTax', 'Revenues', 'SalesRevenueNet',
-    'RevenueFromContractWithCustomerIncludingAssessedTax', 'SalesRevenueGoodsNet'],
+    'RevenueFromContractWithCustomerIncludingAssessedTax', 'SalesRevenueGoodsNet',
+    'RevenuesNetOfInterestExpense', 'RegulatedAndUnregulatedOperatingRevenue', 'RevenuesExcludingInterestAndDividends'],
   netIncome: ['NetIncomeLoss', 'NetIncomeLossAvailableToCommonStockholdersBasic', 'ProfitLoss'],
   eps: ['EarningsPerShareDiluted', 'EarningsPerShareBasicAndDiluted', 'EarningsPerShareBasic'],
   equity: ['StockholdersEquity', 'StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest'],
   opCash: ['NetCashProvidedByUsedInOperatingActivities', 'NetCashProvidedByUsedInOperatingActivitiesContinuingOperations'],
-  capex: ['PaymentsToAcquirePropertyPlantAndEquipment', 'PaymentsToAcquireProductiveAssets'],
+  capex: ['PaymentsToAcquirePropertyPlantAndEquipment', 'PaymentsToAcquireProductiveAssets',
+    'PaymentsToAcquireOilAndGasPropertyAndEquipment', 'PaymentsToAcquireOtherPropertyPlantAndEquipment',
+    'PaymentsForCapitalImprovements', 'PaymentsForProceedsFromProductiveAssets', 'PaymentsToAcquireOtherProductiveAssets'],
   opIncome: ['OperatingIncomeLoss'],
   pretax: ['IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest',
     'IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments'],
@@ -38,7 +44,25 @@ const DAY = 86400000;
 export function splitFactorAfter(filedIso, splits) {
   const filed = Date.parse(filedIso);
   let f = 1;
-  for (const s of splits || []) if (s.date * 1000 > filed) f *= s.ratio;
+  for (const s of splits || []) if (s.date * 1000 > filed && isShareSplit(s.ratio)) f *= s.ratio;
+  return f;
+}
+
+// Yahoo lists spin-offs as "splits" with odd ratios (1.272, 1.048...). Those adjust the price
+// history but do not change the share count, so reported EPS must not be divided by them.
+// A real split or stock dividend is a small-integer fraction (2, 3/2, 5/4, 11/10, 1/8...).
+export function isShareSplit(ratio) {
+  if (!(ratio > 0) || Math.abs(ratio - 1) < 1e-6) return false;
+  const r = ratio >= 1 ? ratio : 1 / ratio;
+  for (let m = 1; m <= 10; m++) if (Math.abs(r * m - Math.round(r * m)) < 0.002 * m) return true;
+  return false;
+}
+
+// Product of the spin-off ratios after a date: multiplying an adjusted historical close by it
+// gives back the price that actually traded against that year's reported EPS.
+export function spinFactorAfter(ms, splits) {
+  let f = 1;
+  for (const s of splits || []) if (s.date * 1000 > ms && !isShareSplit(s.ratio) && s.ratio > 0) f *= s.ratio;
   return f;
 }
 
@@ -141,7 +165,7 @@ export function buildYears(facts, splits) {
   for (const k of Object.keys(CONCEPTS)) s[k] = annualSeries(facts, k, splits);
   const all = new Set([...s.revenue.keys(), ...s.netIncome.keys(), ...s.equity.keys()]);
   const years = [...all].sort((a, b) => a - b);
-  return years.map((fy) => {
+  const out = years.map((fy) => {
     const r = {
       fy, end: s.equity.get(fy)?.end || s.revenue.get(fy)?.end || s.netIncome.get(fy)?.end || null,
       revenue: val(s.revenue, fy), netIncome: val(s.netIncome, fy), eps: val(s.eps, fy),
@@ -149,8 +173,14 @@ export function buildYears(facts, splits) {
       opIncome: val(s.opIncome, fy), pretax: val(s.pretax, fy), tax: val(s.tax, fy),
       ltDebt: val(s.ltDebt, fy), shares: val(s.shares, fy),
     };
+    // Some filers tag the share count in thousands or millions; EPS and net income give the true scale.
+    if (r.shares && r.netIncome && r.eps && Math.abs(r.eps) >= 0.02) {
+      const q = r.netIncome / r.eps / r.shares;
+      for (const f of [1e3, 1e6, 1e-3, 1e-6]) if (q > f * 0.5 && q < f * 2) { r.shares *= f; r.sharesRescaled = true; }
+    }
     if (r.eps == null && r.netIncome != null && r.shares) r.eps = r.netIncome / r.shares;
     r.fcf = r.opCash != null ? r.opCash - (r.capex || 0) : null;
+    r.capexMissing = r.opCash != null && r.capex == null;
     r.bvps = r.equity != null && r.shares ? r.equity / r.shares : null;
     let t = r.pretax && r.tax != null && r.pretax > 0 ? r.tax / r.pretax : DEFAULTS.fallbackTaxRate;
     t = Math.min(Math.max(t, 0), 0.5);
@@ -159,6 +189,20 @@ export function buildYears(facts, splits) {
     r.roic = nopat != null && ic != null && ic > 0 ? nopat / ic : null;
     return r;
   });
+  // Years without EPS cannot be scale-checked above: compare them with the company's median count.
+  const counts = out.map((r) => r.shares).filter((v) => v > 0).sort((x, y) => x - y);
+  const med = counts[counts.length >> 1];
+  for (const r of out) {
+    if (!r.shares || !med) continue;
+    const q = med / r.shares;
+    for (const f of [1e3, 1e6, 1e-3, 1e-6]) {
+      if (q > f * 0.3 && q < f * 3) {
+        r.shares *= f; r.sharesRescaled = true;
+        r.bvps = r.equity != null ? r.equity / r.shares : null;
+      }
+    }
+  }
+  return out;
 }
 
 // Compound annual growth from `start` to `end` over n years.
@@ -202,14 +246,21 @@ export function bigFive(rows, min = DEFAULTS.bigFiveMin) {
       .map((w) => ({ ...w, pass: w.value != null && w.value >= min }));
     const known = windows.filter((w) => w.value != null || w.negative);
     const passed = known.filter((w) => w.pass).length;
-    const status = known.length === 0 ? 'unknown' : passed === known.length ? 'pass' : passed === 0 ? 'fail' : 'mixed';
-    return { ...m, windows, passed, known: known.length, status };
+    // The book's test is the long-term rate (10 years when available); the shorter windows
+    // show whether it is holding up, so they set the trend, not the verdict.
+    const main = known[0] || null;
+    const status = !main ? 'unknown' : main.pass ? 'pass' : 'fail';
+    const recent = known.slice(1);
+    const trend = !main || !recent.length ? null
+      : recent.every((w) => w.pass) ? 'steady'
+        : recent[recent.length - 1].pass ? 'recovering' : 'weakening';
+    return { ...m, windows, passed, known: known.length, status, main, trend, consistent: known.length > 0 && passed === known.length };
   });
 }
 
 // Historical P/E: price at each fiscal-year end / that year's EPS, last up to 10 years.
 // monthly: [{t: epochSeconds, close}] (split-adjusted closes)
-export function historicalPE(rows, monthly) {
+export function historicalPE(rows, monthly, splits) {
   const pes = [];
   for (const r of rows.slice(-10)) {
     if (!r.end || !(r.eps > 0)) continue;
@@ -219,7 +270,7 @@ export function historicalPE(rows, monthly) {
       const d = Math.abs(m.t * 1000 - endMs);
       if (m.close != null && d < 40 * DAY && (!best || d < best.d)) best = { d, close: m.close };
     }
-    if (best) pes.push({ fy: r.fy, price: best.close, eps: r.eps, pe: best.close / r.eps });
+    if (best) { const price = best.close * spinFactorAfter(endMs, splits); pes.push({ fy: r.fy, price, eps: r.eps, pe: price / r.eps }); }
   }
   // Median, not mean: one-off charges (e.g. 2017 tax reform) create absurd single-year P/Es.
   const sorted = pes.map((x) => x.pe).sort((a, b) => a - b);
@@ -236,7 +287,9 @@ export function ruleGrowth(big5, analystGrowth) {
   if (hist) candidates.push({ source: `צמיחת ההון העצמי ההיסטורית (${hist.n} שנים)`, value: hist.value });
   if (analystGrowth != null && Number.isFinite(analystGrowth)) candidates.push({ source: 'הערכת אנליסטים', value: analystGrowth });
   if (!candidates.length) return null;
-  return candidates.reduce((a, b) => (b.value < a.value ? b : a));
+  const low = candidates.reduce((a, b) => (b.value < a.value ? b : a));
+  if (low.value > DEFAULTS.growthCap) return { source: `${low.source}: ${(low.value * 100).toFixed(1)}%, נחתך לתקרה של טאון`, value: DEFAULTS.growthCap, raw: low.value, capped: true };
+  return { ...low, raw: low.value, capped: false };
 }
 
 export function stickerPrice({ eps, growth, historicalPe, peOverride, marr = DEFAULTS.marr, years = DEFAULTS.years, mosFraction = DEFAULTS.mosFraction }) {
@@ -245,8 +298,11 @@ export function stickerPrice({ eps, growth, historicalPe, peOverride, marr = DEF
   const defaultPe = growth * 100 * 2;
   let futurePe, peSource;
   if (peOverride > 0) { futurePe = peOverride; peSource = 'הוזן ידנית'; }
-  else if (historicalPe > 0 && historicalPe < defaultPe) { futurePe = historicalPe; peSource = 'מכפיל היסטורי (חציון), נמוך מפי 2 מהצמיחה'; }
-  else { futurePe = defaultPe; peSource = 'פי 2 משיעור הצמיחה'; }
+  else {
+    if (historicalPe > 0 && historicalPe < defaultPe) { futurePe = historicalPe; peSource = 'מכפיל היסטורי (חציון), נמוך מפי 2 מהצמיחה'; }
+    else { futurePe = defaultPe; peSource = 'פי 2 משיעור הצמיחה'; }
+    if (futurePe > DEFAULTS.peCap) { futurePe = DEFAULTS.peCap; peSource += `, נחתך לתקרה ${DEFAULTS.peCap}`; }
+  }
   const futureEps = eps * Math.pow(1 + growth, years);
   const futurePrice = futureEps * futurePe;
   const discount = Math.pow(1 + marr, years);
@@ -332,6 +388,30 @@ export function townTools(daily) {
   return { tools, ups, signal, asOf: bars[i].t };
 }
 
+// Payback Time price: what 8 years of free cash flow per share, growing at g, add up to.
+// Paying this price means the business "pays you back" in exactly 8 years.
+export function paybackPrice(fcfPerShare, growth, years = DEFAULTS.paybackMaxYears) {
+  if (!(fcfPerShare > 0)) return null;
+  const g = growth > 0 ? growth : 0;
+  let sum = 0, cf = fcfPerShare;
+  for (let y = 1; y <= years; y++) { cf *= 1 + g; sum += cf; }
+  return sum;
+}
+
+// The growth rate the current price already assumes: the g at which the sticker price equals
+// the price, using the same PE rule (2 x growth, capped by history and by 50).
+export function impliedGrowth({ price, eps, historicalPe, marr = DEFAULTS.marr }) {
+  if (!(price > 0) || !(eps > 0)) return null;
+  const at = (g) => {
+    const pe = Math.min(g * 200, historicalPe > 0 ? historicalPe : Infinity, DEFAULTS.peCap);
+    return eps * Math.pow(1 + g, DEFAULTS.years) * pe / Math.pow(1 + marr, DEFAULTS.years);
+  };
+  let lo = 0.001, hi = 1;
+  if (at(hi) < price) return null;
+  for (let i = 0; i < 60; i++) { const mid = (lo + hi) / 2; if (at(mid) < price) lo = mid; else hi = mid; }
+  return hi;
+}
+
 // ---------- Full analysis + verdict ----------
 // asOf (optional ISO date): point-in-time mode for the backtest — the caller has already
 // stripped facts/prices filed after that date; this only anchors the 12-year window.
@@ -341,7 +421,7 @@ export function analyze({ facts, splits, monthly, daily, price, analystGrowth = 
   if (rows.length < 2) return { ok: false, reason: 'אין מספיק דוחות שנתיים (10-K) לחברה הזו ב-SEC' };
   const last = rows[rows.length - 1];
   const big5 = bigFive(rows);
-  const hpe = historicalPE(rows, monthly);
+  const hpe = historicalPE(rows, monthly, splits);
   const growth = growthOverride != null && Number.isFinite(growthOverride)
     ? { source: 'הוזן ידנית', value: growthOverride }
     : ruleGrowth(big5, analystGrowth);
@@ -351,29 +431,42 @@ export function analyze({ facts, splits, monthly, daily, price, analystGrowth = 
   const sticker = stickerPrice({ eps: ttm.value, growth: growth?.value, historicalPe: hpe.average, peOverride, marr });
   const fcfPs = last.fcf != null && last.shares ? last.fcf / last.shares : null;
   const payback = paybackYears(price, fcfPs, growth?.value);
+  // The three valuations of "Invested": Margin of Safety (sticker / 2), Ten Cap, Payback Time.
+  const tenCap = fcfPs > 0 ? fcfPs * DEFAULTS.tenCapMultiple : null;
+  const pbPrice = paybackPrice(fcfPs, growth?.value);
+  const implied = impliedGrowth({ price, eps: ttm.value, historicalPe: hpe.average, marr });
+  const pes = hpe.points.map((x) => x.pe).sort((x, y) => x - y);
+  const pe = { current: ttm.value > 0 ? price / ttm.value : null, median: hpe.average, low: pes[0] ?? null, high: pes[pes.length - 1] ?? null };
+  const scenarios = ttm.value > 0 ? [0.05, 0.10, 0.15].map((g) => ({ ...stickerPrice({ eps: ttm.value, growth: g, historicalPe: hpe.average, marr }), growth: g })) : [];
   const debtYears = last.ltDebt != null && last.fcf > 0 ? last.ltDebt / last.fcf : null;
   const tech = townTools(daily);
 
   const b5pass = big5.filter((m) => m.status === 'pass').length;
   const b5fail = big5.filter((m) => m.status === 'fail').length;
-  const wonderful = b5pass >= 4 && b5fail === 0;
+  const wonderful = b5pass >= 4;
+  const b5consistent = big5.filter((m) => m.consistent).length;
 
   const b5unknown = big5.filter((m) => m.status === 'unknown').length;
 
   let verdict;
   if (b5unknown >= 2) verdict = { code: 'no-price', title: 'אין מספיק נתונים לפסיקה', text: `${b5unknown} מתוך 5 המספרים הגדולים חסרים, כי החברה לא מדווחת אותם בפורמט הסטנדרטי של ה-SEC (למשל רווח למניה). אי אפשר לבדוק אותה לפי הספר בכלי הזה.` };
-  else if (!wonderful) verdict = { code: 'not-wonderful', title: 'לא עומדת בכללי הספר', text: `רק ${b5pass} מתוך 5 המספרים הגדולים עוברים את רף ה-10% בעקביות. לפי טאון — אם העסק לא נהדר, המחיר לא משנה.` };
+  else if (!wonderful) verdict = { code: 'not-wonderful', title: 'לא עומדת בכללי הספר', text: `רק ${b5pass} מתוך 5 המספרים הגדולים עוברים את רף ה-10% לשנה בטווח הארוך. לפי טאון, אם העסק לא נהדר, המחיר לא משנה.` };
   else if (!sticker.ok) verdict = { code: 'no-price', title: 'עסק טוב — אבל אי אפשר לתמחר', text: sticker.reason };
-  else if (price <= sticker.mos) verdict = { code: 'buy', title: 'זולה — שווה קנייה לפי הספר', text: `המחיר ${fmtUsd(price)} נמוך ממחיר מרווח-הביטחון ${fmtUsd(sticker.mos)}.` + (sticker.growth > 0.2 ? ' שים לב: התוצאה נשענת על צמיחה גבוהה מאוד (ראה אזהרות).' : '') };
+  else if (price <= sticker.mos) verdict = { code: 'buy', title: 'זולה — שווה קנייה לפי הספר', text: `המחיר ${fmtUsd(price)} נמוך ממחיר מרווח-הביטחון ${fmtUsd(sticker.mos)}.` };
   else if (price <= sticker.sticker) verdict = { code: 'fair', title: 'מחיר הוגן — אין מרווח ביטחון', text: `המחיר מתחת לשווי (${fmtUsd(sticker.sticker)}) אבל מעל מחיר הקנייה (${fmtUsd(sticker.mos)}). לפי הספר — מחכים.` };
   else verdict = { code: 'expensive', title: 'יקרה — לא שווה קנייה', text: `המחיר ${fmtUsd(price)} גבוה מהשווי לפי הספר (${fmtUsd(sticker.sticker)}).` };
 
   const warnings = [];
-  if (sticker.ok && sticker.growth > 0.2) warnings.push(`שיעור הצמיחה ${(sticker.growth * 100).toFixed(1)}% בשנה הוא גבוה מאוד. מעט מאוד חברות מחזיקות קצב כזה 10 שנים, והמחיר רגיש מאוד להנחה הזו. כדאי להזין הערכת אנליסטים או צמיחה ידנית שמרנית.`);
-  if (sticker.ok && sticker.futurePe > 50) warnings.push(`המכפיל העתידי ${sticker.futurePe.toFixed(1)} גבוה מאוד, ולכן המחיר העתידי אופטימי.`);
+  if (growth?.capped) warnings.push(`צמיחת ההון ההיסטורית היא ${(growth.raw * 100).toFixed(1)}% בשנה, אבל החישוב משתמש ב-${(DEFAULTS.growthCap * 100).toFixed(0)}%: טאון לא מרשה להניח יותר מזה, כי כמעט אף חברה לא מחזיקה קצב גבוה יותר 10 שנים.`);
+  if (sticker.ok && sticker.growth > DEFAULTS.growthCap + 1e-9) warnings.push(`הוזנה צמיחה של ${(sticker.growth * 100).toFixed(1)}%, מעל התקרה של טאון (${(DEFAULTS.growthCap * 100).toFixed(0)}%). המחיר רגיש מאוד להנחה הזו.`);
+  if (sticker.ok && analystGrowth == null && growthOverride == null) warnings.push('החישוב נשען רק על הצמיחה ההיסטורית. לפי הספר לוקחים את הנמוך בין ההיסטוריה להערכת האנליסטים ל-5 שנים. אם יש לך הערכה כזו, הזן אותה למטה.');
+  if (ttm.quarters > 0 && last.eps > 0 && (ttm.value / last.eps > 2 || ttm.value / last.eps < 0.5)) warnings.push(`הרווח למניה ב-12 החודשים האחרונים (${fmtUsd(ttm.value)}) רחוק מאוד מהדוח השנתי האחרון (${fmtUsd(last.eps)}). כנראה יש אירוע חד-פעמי, והמחיר שמחושב ממנו פחות אמין.`);
+  if (last.capexMissing) warnings.push('החברה לא מדווחת השקעות הוניות בתג הסטנדרטי, ולכן התזרים החופשי כאן הוא התזרים התפעולי כולו, והוא מוטה כלפי מעלה.');
+  if (rows.some((r) => r.sharesRescaled)) warnings.push('בחלק מהשנים מספר המניות דווח באלפים או במיליונים, ותוקן אוטומטית לפי הרווח הנקי והרווח למניה.');
+  if ((splits || []).some((x) => !isShareSplit(x.ratio) && Math.abs(x.ratio - 1) > 0.01)) warnings.push('החברה פיצלה מתוכה חברה-בת (ספין-אוף). הרווח למניה בשנים שלפני הפיצול כולל את העסק שיצא, ולכן הצמיחה ההיסטורית פחות נקייה.');
   if (hpe.points.length < 5) warnings.push('יש פחות מ-5 שנים לחישוב המכפיל ההיסטורי.');
   if (rows.length < 11) warnings.push(`יש רק ${rows.length} דוחות שנתיים, כך שבדיקת 10 השנים לא שלמה.`);
-  return { ok: true, rows, last, big5, b5pass, hpe, growth, ttm, sticker, fcfPs, payback, debtYears, tech, verdict, price, warnings };
+  return { ok: true, rows, last, big5, b5pass, b5consistent, wonderful, hpe, growth, ttm, sticker, fcfPs, payback, tenCap, pbPrice, implied, pe, scenarios, debtYears, tech, verdict, price, warnings };
 }
 
 export function fmtUsd(v) {

@@ -145,3 +145,36 @@ test('pickUnit prefers the metric unit over stray units (Coca-Cola "pure")', asy
   assert.equal(pickUnit({ units: { pure: [1], USD: [1] } }, 'revenue'), 'USD');
   assert.equal(pickUnit({ units: { EUR: [1, 2], pure: [1] } }, 'revenue'), 'EUR');
 });
+
+test('isShareSplit: real splits yes, spin-off ratios no', async () => {
+  const { isShareSplit } = await import('../public/rule1.js');
+  for (const r of [2, 4, 10, 1.5, 1.25, 1.1, 0.125]) assert.equal(isShareSplit(r), true, String(r));
+  for (const r of [1.272, 1.048, 1.094, 1.311791, 1.806, 1]) assert.equal(isShareSplit(r), false, String(r));
+});
+
+test('growth is capped at 15% and the future PE at 50', async () => {
+  const { ruleGrowth, stickerPrice } = await import('../public/rule1.js');
+  const g = ruleGrowth([{ key: 'bvps', windows: [{ n: 10, value: 0.417 }] }], null);
+  assert.equal(g.value, 0.15); assert.equal(g.capped, true); assert.ok(Math.abs(g.raw - 0.417) < 1e-9);
+  assert.equal(ruleGrowth([{ key: 'bvps', windows: [{ n: 10, value: 0.3 }] }], 0.08).value, 0.08);
+  assert.equal(stickerPrice({ eps: 1, growth: 0.4, historicalPe: 70 }).futurePe, 50);
+  assert.equal(stickerPrice({ eps: 1, growth: 0.4, peOverride: 70 }).futurePe, 70);
+});
+
+test('bigFive: the longest window decides, shorter windows set the trend', async () => {
+  const { bigFive } = await import('../public/rule1.js');
+  const rows = [];
+  // revenue grows 12%/yr for 9 years, then falls 5% in the last year: 10y rate still above 10%
+  for (let i = 0; i <= 10; i++) rows.push({ fy: 2010 + i, revenue: 100 * Math.pow(1.13, Math.min(i, 9)) * (i === 10 ? 0.95 : 1), eps: 1, bvps: 1, fcf: 1, roic: 0.2 });
+  const rev = bigFive(rows).find((m) => m.key === 'revenue');
+  assert.equal(rev.status, 'pass'); assert.equal(rev.trend, 'weakening'); assert.equal(rev.consistent, false);
+});
+
+test('paybackPrice and impliedGrowth', async () => {
+  const { paybackPrice, impliedGrowth, stickerPrice } = await import('../public/rule1.js');
+  assert.equal(paybackPrice(1, 0), 8);
+  assert.ok(Math.abs(paybackPrice(1, 0.1) - 12.579) < 0.01);
+  assert.equal(paybackPrice(-1, 0.1), null);
+  const s = stickerPrice({ eps: 5, growth: 0.12, historicalPe: 40 });
+  assert.ok(Math.abs(impliedGrowth({ price: s.sticker, eps: 5, historicalPe: 40 }) - 0.12) < 1e-4);
+});

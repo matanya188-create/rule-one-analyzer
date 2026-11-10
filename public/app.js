@@ -154,7 +154,7 @@ function render() {
   const a = run();
   if (!a.ok) { showError(a.reason); return; }
   const c = state.company, p = state.prices;
-  out.innerHTML = [verdictCard(a, c, p), bigFiveCard(a), `<div class="grid2">${stickerCard(a)}${extrasCard(a)}</div>`, toolsCard(a), dataCard(a)].join('');
+  out.innerHTML = [verdictCard(a, c, p), valuationCard(a), bigFiveCard(a), `<div class="grid2">${stickerCard(a)}${extrasCard(a)}</div>`, toolsCard(a), dataCard(a)].join('');
   bindParams();
 }
 
@@ -162,8 +162,8 @@ function verdictCard(a, c, p) {
   const s = a.sticker;
   const kpis = [
     ['מחיר נוכחי', fmtUsd(a.price)],
-    ['מחיר סטיקר (שווי)', s.ok ? fmtUsd(s.sticker) : '—'],
     ['מחיר קנייה (מרווח ביטחון)', s.ok ? fmtUsd(s.mos) : '—'],
+    ['מחיר סטיקר (שווי)', s.ok ? fmtUsd(s.sticker) : '—'],
     ['חמשת המספרים', `${a.b5pass} / 5`],
   ];
   return `<section class="card verdict v-${a.verdict.code}">
@@ -171,32 +171,79 @@ function verdictCard(a, c, p) {
     <div class="muted">${esc(p.exchange || '')} · דוח שנתי אחרון: ${esc(a.last.end || a.last.fy)}${p.asOf ? ` · מחיר נכון ל-${esc(new Date(p.asOf * 1000).toLocaleDateString('he-IL'))}` : ''}</div></div></div>
     <div class="badge">${esc(a.verdict.title)}</div>
     <div>${bidi(a.verdict.text)}</div>
-    ${s.ok ? priceBar(a.price, s.mos, s.sticker) : ''}
-    ${a.warnings.length ? `<ul class="warns">${a.warnings.map((w) => `<li>${bidi(w)}</li>`).join('')}</ul>` : ''}
+    ${s.ok ? scale(a) : ''}
     <div class="kpis">${kpis.map(([l, v]) => `<div class="kpi"><div class="l">${l}</div><div class="v">${esc(v)}</div></div>`).join('')}</div>
+    ${a.warnings.length ? `<ul class="warns">${a.warnings.map((w) => `<li>${bidi(w)}</li>`).join('')}</ul>` : ''}
   </section>`;
 }
 
-function priceBar(price, mos, sticker) {
-  const max = Math.max(price, sticker) * 1.15;
+// Where the price sits: green up to the buy price, amber up to the sticker, red above it.
+function scale(a) {
+  const { mos, sticker } = a.sticker, price = a.price;
+  const max = Math.max(sticker * 1.5, Math.min(price * 1.1, sticker * 4));
   const pos = (v) => Math.min(Math.max((v / max) * 100, 0), 100);
-  return `<div class="bar" role="img" aria-label="מיקום המחיר מול מחיר הקנייה והשווי">
-    <div class="tick" style="right:${pos(mos)}%"><span>קנייה ${fmtUsd(mos)}</span></div>
-    <div class="tick" style="right:${pos(sticker)}%"><span>שווי ${fmtUsd(sticker)}</span></div>
-    <div class="tick now" style="right:${pos(price)}%"><span>עכשיו ${fmtUsd(price)}</span></div>
-  </div>`;
+  const off = price > max;
+  const ratio = price / sticker;
+  const where = price <= mos ? `${pct(1 - price / mos, 0)} מתחת למחיר הקנייה`
+    : price <= sticker ? `${pct(price / mos - 1, 0)} מעל מחיר הקנייה, ${pct(1 - ratio, 0)} מתחת לשווי`
+      : `${pct(ratio - 1, 0)} מעל השווי`;
+  return `<div class="scale" role="img" aria-label="מיקום המחיר על הסקאלה: ${esc(where)}">
+    <div class="track">
+      <div class="zone z-buy" style="width:${pos(mos)}%"><span>זולה</span></div>
+      <div class="zone z-fair" style="width:${pos(sticker) - pos(mos)}%"><span>הוגנת</span></div>
+      <div class="zone z-exp" style="width:${100 - pos(sticker)}%"><span>יקרה</span></div>
+      <div class="pin" style="left:${pos(price)}%"><b>${off ? '◄ ' : ''}${fmtUsd(price)}</b></div>
+    </div>
+    <div class="marks"><span style="left:${pos(mos)}%">${fmtUsd(mos)}</span><span style="left:${pos(sticker)}%">${fmtUsd(sticker)}</span></div>
+  </div>
+  <p class="where">המחיר היום הוא <b>${bidi(where)}</b>, כלומר ${bidi(pct(ratio, 0))} מהשווי לפי הספר.</p>`;
+}
+
+// The three valuation methods of Town's later books, side by side with what the price implies.
+function valuationCard(a) {
+  const s = a.sticker, price = a.price;
+  const diff = (v) => (v == null ? '—' : `${price > v ? '+' : ''}${pct(price / v - 1, 0)}`);
+  const row = (label, v, note, ok) => `<tr><td>${esc(label)}<small class="muted">${bidi(note)}</small></td>
+    <td class="num"><b>${v == null ? '—' : fmtUsd(v)}</b></td>
+    <td><span class="cell num ${v == null ? 'na' : ok ? 'ok' : 'no'}">${v == null ? 'אין נתון' : diff(v)}</span></td></tr>`;
+  const g = s.ok ? s.growth : a.growth?.value;
+  const methods = [
+    ['מרווח ביטחון (חצי מהסטיקר)', s.ok ? s.mos : null, 'הרווח למניה בעוד 10 שנים כפול המכפיל, מהוון ב-15% לשנה, חלקי 2.'],
+    ['Ten Cap (פי 10 מהתזרים החופשי)', a.tenCap, `תזרים חופשי למניה $${num(a.fcfPs)} בדוח השנתי האחרון, כפול 10. מחיר שנותן תשואת-מזומן של 10% בשנה.`],
+    ['Payback Time (החזר ב-8 שנים)', a.pbPrice, `סכום התזרים החופשי למניה ב-8 השנים הבאות, כשהוא גדל ב-${pct(g)} בשנה.`],
+  ];
+  const cheap = methods.filter(([, v]) => v != null && price <= v).length, known = methods.filter(([, v]) => v != null).length;
+  const pe = a.pe;
+  const ctx = [];
+  if (a.implied != null) ctx.push(['הצמיחה שהמחיר מגלם', pct(a.implied), `כדי שהמחיר של היום יהיה שווה לסטיקר, הרווח צריך לגדול בקצב הזה 10 שנים. לפי הספר מניחים ${pct(g)}.`, g != null ? a.implied <= g : null]);
+  if (pe.current != null) ctx.push(['מכפיל רווח נוכחי', num(pe.current, 1), pe.median != null ? `חציון 10 שנים: ${num(pe.median, 1)}. טווח: ${num(pe.low, 1)} עד ${num(pe.high, 1)}.` : 'אין היסטוריית מכפילים.', pe.median != null ? pe.current <= pe.median : null]);
+  if (a.fcfPs > 0) ctx.push(['תשואת תזרים חופשי', pct(a.fcfPs / price), 'תזרים חופשי למניה חלקי המחיר. Ten Cap דורש 10% לפחות.', a.fcfPs / price >= 0.1]);
+  const sc = a.scenarios.filter((x) => x.ok);
+  return `<section class="card"><h2>איפה המחיר עומד: שלוש שיטות התמחור של טאון</h2>
+    <p class="muted" style="margin-top:-6px">טאון מחשב שלושה מחירי קנייה ורוצה שהמחיר בשוק יהיה מתחת לכולם. כאן המחיר של היום (${bidi(fmtUsd(price))}) נמוך מ-${cheap} מתוך ${known}.</p>
+    <div class="scroll"><table class="val"><tr><th>שיטה</th><th>מחיר קנייה מרבי</th><th>המחיר היום מול זה</th></tr>
+    ${methods.map(([l, v, n]) => row(l, v, n, v != null && price <= v)).join('')}
+    ${s.ok ? row('מחיר הסטיקר (השווי המלא)', s.sticker, 'מעל המחיר הזה המניה יקרה לפי הספר, וזה גם מחיר המכירה.', price <= s.sticker) : ''}</table></div>
+    ${ctx.length ? `<ul class="steps" style="margin-top:12px">${ctx.map(([l, v, n, ok]) => `<li><span>${esc(l)}<small>${bidi(n)}</small></span><b><span class="cell num ${ok == null ? 'na' : ok ? 'ok' : 'no'}">${bidi(v)}</span></b></li>`).join('')}</ul>` : ''}
+    ${sc.length ? `<h3 style="margin-top:16px">רגישות להנחת הצמיחה</h3>
+    <div class="scroll"><table class="val"><tr><th>צמיחה שנתית</th><th>מכפיל עתידי</th><th>מחיר קנייה</th><th>סטיקר</th><th>פסיקה במחיר של היום</th></tr>
+    ${sc.map((x) => { const v = price <= x.mos ? ['ok', 'זולה'] : price <= x.sticker ? ['mix', 'הוגנת'] : ['no', 'יקרה']; return `<tr><td class="num">${pct(x.growth, 0)}</td><td class="num">${num(x.futurePe, 1)}</td><td class="num">${fmtUsd(x.mos)}</td><td class="num">${fmtUsd(x.sticker)}</td><td><span class="cell ${v[0]}">${v[1]}</span></td></tr>`; }).join('')}</table></div>
+    <p class="note">אותה נוסחה בשלוש הנחות צמיחה, כדי לראות כמה הפסיקה תלויה בהנחה. 15% היא התקרה שטאון מרשה.</p>` : ''}
+  </section>`;
 }
 
 function bigFiveCard(a) {
-  const head = `<tr><th>מדד</th>${[10, 5, 3, 1].map((n) => `<th>${n === 1 ? 'שנה' : n + ' שנים'}</th>`).join('')}<th>מצב</th></tr>`;
-  const st = { pass: ['ok', 'עובר'], fail: ['no', 'נכשל'], mixed: ['mix', 'חלקי'], unknown: ['na', 'אין נתון'] };
+  const head = `<tr><th>מדד</th>${[10, 5, 3, 1].map((n) => `<th>${n === 1 ? 'שנה' : n + ' שנים'}</th>`).join('')}<th>מצב</th><th>מגמה</th></tr>`;
+  const st = { pass: ['ok', 'עובר'], fail: ['no', 'נכשל'], unknown: ['na', 'אין נתון'] };
+  const tr = { steady: ['ok', 'יציבה'], recovering: ['mix', 'מתאוששת'], weakening: ['mix', 'נחלשת'] };
   const rows = a.big5.map((m) => `<tr><td>${esc(m.label)}${m.mode === 'average' ? '<small class="muted"> (ממוצע)</small>' : ''}</td>
-    ${m.windows.map((w) => `<td><span class="cell num ${w.negative ? 'no' : w.value == null ? 'na' : w.pass ? 'ok' : 'no'}" title="${esc(w.reason || '')}">${w.negative ? 'שלילי' : pct(w.value)}</span></td>`).join('')}
-    <td><span class="cell ${st[m.status][0]}">${st[m.status][1]}</span></td></tr>`).join('');
-  return `<section class="card"><h2>חמשת המספרים הגדולים</h2>
-    <p class="muted" style="margin-top:-6px">כל מספר צריך להיות לפחות 10%, ובעקביות לאורך כל התקופות. עקביות כזאת מעידה שיש לעסק חפיר.</p>
+    ${m.windows.map((w) => `<td><span class="cell num ${w.negative ? 'no' : w.value == null ? 'na' : w.pass ? 'ok' : 'no'}${w === m.main ? ' main' : ''}" title="${esc(w.reason || '')}">${w.negative ? 'שלילי' : pct(w.value)}</span></td>`).join('')}
+    <td><span class="cell ${st[m.status][0]}">${st[m.status][1]}</span></td>
+    <td>${m.trend ? `<span class="cell ${tr[m.trend][0]}">${tr[m.trend][1]}</span>` : '<span class="cell na">—</span>'}</td></tr>`).join('');
+  return `<section class="card"><h2>חמשת המספרים הגדולים: האם זה עסק נהדר</h2>
+    <p class="muted" style="margin-top:-6px">לפי הספר כל מספר צריך להיות לפחות 10% בשנה לאורך 10 שנים. זה המבחן (התא עם המסגרת). החלונות הקצרים מראים אם הקצב נשמר, וקובעים את המגמה. ${a.b5pass} מתוך 5 עוברים, ו-${a.b5consistent} מהם עוברים בכל החלונות.</p>
     <div class="scroll"><table class="bf">${head}${rows}</table></div>
-    <p class="note">צמיחה = קצב שנתי ממוצע (CAGR) מהשנה הבסיסית עד הדוח האחרון. ROIC = רווח תפעולי אחרי מס חלקי (הון עצמי + חוב לטווח ארוך). כשיש ערך שלילי בתחילת התקופה או בסופה אין צמיחה, והתא מסומן "שלילי" באדום. תא אפור = אין מספיק היסטוריה.</p>
+    <p class="note">צמיחה = קצב שנתי ממוצע (CAGR) מהשנה הבסיסית עד הדוח האחרון. ROIC = רווח תפעולי אחרי מס חלקי (הון עצמי + חוב לטווח ארוך). כשאין 10 שנות נתונים, המבחן הוא החלון הארוך ביותר שיש. ערך שלילי בתחילת התקופה או בסופה מסומן "שלילי". תא אפור = אין מספיק היסטוריה.</p>
   </section>`;
 }
 
@@ -215,9 +262,9 @@ function stickerCard(a) {
       ? ['רווח למניה ב-12 החודשים האחרונים (TTM)', `$${num(s.eps)}`,
         `דוח שנתי ${a.last.fy} ($${num(a.ttm.parts.annual)}) + ${a.ttm.quarters} רבעונים ($${num(a.ttm.parts.ytd)}) − אותם רבעונים אשתקד ($${num(a.ttm.parts.prior)}). נכון ל-${new Date(a.ttm.asOf).toLocaleDateString('he-IL')}`]
       : ['רווח למניה אחרון (EPS)', `$${num(s.eps)}`, a.ttm.note || `דוח שנתי ${a.last.fy}. עוד אין דוח רבעוני חדש יותר`],
-    ['שיעור צמיחה לפי הספר', pct(s.growth), a.growth?.source],
+    ['שיעור צמיחה לפי הספר', pct(s.growth), `${a.growth?.source || ''}. הנמוך בין ההיסטוריה להערכת האנליסטים, ולא יותר מ-15%`],
     [`רווח למניה בעוד ${s.years} שנים`, `$${num(s.futureEps)}`, `EPS × (1 + צמיחה)^${s.years}`],
-    ['מכפיל עתידי', num(s.futurePe, 1), `${s.peSource}. פי 2 מהצמיחה = ${num(s.defaultPe, 1)}, היסטורי = ${num(a.hpe.average, 1)}`],
+    ['מכפיל עתידי', num(s.futurePe, 1), `${s.peSource}. פי 2 מהצמיחה = ${num(s.defaultPe, 1)}, היסטורי = ${num(a.hpe.average, 1)}, תקרה = 50`],
     [`מחיר עתידי בעוד ${s.years} שנים`, fmtUsd(s.futurePrice), 'EPS עתידי × מכפיל'],
     ['מחיר סטיקר (שווי היום)', fmtUsd(s.sticker), `מהוון ב-${pct(s.marr, 0)} לשנה (חלקי ${num(s.discount, 2)})`],
     ['מחיר קנייה עם מרווח ביטחון', fmtUsd(s.mos), `${pct(s.mosFraction, 0)} מהסטיקר`],
@@ -237,7 +284,7 @@ function extrasCard(a) {
   return `<section class="card"><h2>בדיקות נוספות</h2><ul class="steps">
     ${line('זמן החזר (Payback Time)', pbText, pb == null ? null : pbOk, `כמה שנים של תזרים חופשי (שגדל בקצב הצמיחה) צריך כדי להחזיר את המחיר. לפי טאון: עד ${DEFAULTS.paybackMaxYears} שנים.`)}
     ${line('חוב לטווח ארוך בשנות FCF', a.debtYears == null ? '—' : `${num(a.debtYears, 1)} שנים`, a.debtYears == null ? null : debtOk, `האם אפשר לסגור את החוב תוך ${DEFAULTS.debtMaxYearsFcf} שנים מהתזרים החופשי.`)}
-    ${line('תזרים חופשי למניה', a.fcfPs == null ? '—' : `$${num(a.fcfPs)}`, null, 'תזרים מפעילות פחות השקעות ברכוש קבוע, חלקי מספר המניות.')}
+    ${line('תזרים חופשי למניה', a.fcfPs == null ? '—' : `$${num(a.fcfPs)}`, null, `תזרים מפעילות פחות השקעות ברכוש קבוע, חלקי מספר המניות. לפי הדוח השנתי ${a.last.fy}.`)}
     ${line('מכפיל רווח היסטורי (חציון)', num(a.hpe.average, 1), null, `חציון של ${a.hpe.points.length} השנים האחרונות, כדי ששנה חריגה לא תעוות. המחיר בסוף כל שנת כספים חלקי הרווח למניה באותה שנה.`)}
   </ul></section>`;
 }

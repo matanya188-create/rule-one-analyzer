@@ -33,11 +33,14 @@ BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 NEEDED = {
     "RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet",
     "RevenueFromContractWithCustomerIncludingAssessedTax", "SalesRevenueGoodsNet",
+    "RevenuesNetOfInterestExpense", "RegulatedAndUnregulatedOperatingRevenue", "RevenuesExcludingInterestAndDividends",
     "NetIncomeLoss", "NetIncomeLossAvailableToCommonStockholdersBasic", "ProfitLoss",
     "EarningsPerShareDiluted", "EarningsPerShareBasicAndDiluted", "EarningsPerShareBasic",
     "StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
     "NetCashProvidedByUsedInOperatingActivities", "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
     "PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets",
+    "PaymentsToAcquireOilAndGasPropertyAndEquipment", "PaymentsToAcquireOtherPropertyPlantAndEquipment",
+    "PaymentsForCapitalImprovements", "PaymentsForProceedsFromProductiveAssets", "PaymentsToAcquireOtherProductiveAssets",
     "OperatingIncomeLoss",
     "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
     "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
@@ -46,6 +49,10 @@ NEEDED = {
     "WeightedAverageNumberOfDilutedSharesOutstanding", "WeightedAverageNumberOfShareOutstandingBasicAndDiluted",
     "WeightedAverageNumberOfSharesOutstandingBasic",
 }
+
+
+# ticker -> CIKs of the predecessor registrant(s) whose filings hold the older history.
+PREDECESSOR_CIKS = {"XOM": [34088]}  # ExxonMobil Holdings Corp (2026) <- Exxon Mobil Corp
 
 
 def load_config():
@@ -150,6 +157,14 @@ def company(ticker):
         raw = fetch_json(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json", sec_user_agent())
         gaap = raw.get("facts", {}).get("us-gaap", {})
         facts = {k: {"units": v["units"]} for k, v in gaap.items() if k in NEEDED}
+        # A reorganised company files under a new CIK; its history stays under the old one.
+        for old in PREDECESSOR_CIKS.get(ticker, []):
+            prev = fetch_json(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{old:010d}.json", sec_user_agent())
+            for k, v in prev.get("facts", {}).get("us-gaap", {}).items():
+                if k in NEEDED:
+                    units = facts.setdefault(k, {"units": {}})["units"]
+                    for u, rows in v["units"].items():
+                        units.setdefault(u, []).extend(rows)
         return {"ticker": ticker, "cik": cik, "name": raw.get("entityName") or entry["name"], "facts": facts}
     return cached(f"sec_{cik}", 86400, produce)
 
