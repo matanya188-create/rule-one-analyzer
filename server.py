@@ -179,6 +179,62 @@ def yahoo_chart(ticker, rng, interval):
     return res[0]
 
 
+_yahoo = {"opener": None, "crumb": None, "at": 0}
+_yahoo_lock = threading.Lock()
+
+
+def yahoo_session():
+    """Cookie + crumb that Yahoo's quoteSummary endpoint requires; refreshed hourly."""
+    with _yahoo_lock:
+        if _yahoo["crumb"] and time.time() - _yahoo["at"] < 3600:
+            return _yahoo["opener"], _yahoo["crumb"]
+        import http.cookiejar
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        head = {"User-Agent": BROWSER_UA, "Accept": "*/*"}
+        try:  # answers 404 but sets the session cookie
+            opener.open(urllib.request.Request("https://fc.yahoo.com", headers=head), timeout=15).read()
+        except urllib.error.HTTPError:
+            pass
+        crumb = opener.open(urllib.request.Request(
+            "https://query2.finance.yahoo.com/v1/test/getcrumb", headers=head), timeout=15).read().decode().strip()
+        if not crumb or len(crumb) > 40:
+            raise ApiError(502, "Yahoo crumb unavailable")
+        _yahoo.update(opener=opener, crumb=crumb, at=time.time())
+        return opener, crumb
+
+
+def analyst_estimate(ticker):
+    """Analysts' consensus EPS growth for this fiscal year and the next (Yahoo earningsTrend).
+
+    Yahoo no longer publishes a 5-year figure, so the annualised two-year rate stands in
+    for the book's "analysts' estimate". Returns None when there is no usable consensus.
+    """
+    try:
+        opener, crumb = yahoo_session()
+        url = (f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker.replace('.', '-')}"
+               f"?modules=earningsTrend&crumb={urllib.parse.quote(crumb)}")
+        with opener.open(urllib.request.Request(url, headers={"User-Agent": BROWSER_UA}), timeout=20) as r:
+            raw = json.loads(r.read())
+        trend = {x.get("period"): x for x in raw["quoteSummary"]["result"][0]["earningsTrend"]["trend"]}
+        out = {}
+        for key, period in (("thisYear", "0y"), ("nextYear", "+1y")):
+            x = trend.get(period) or {}
+            est = x.get("earningsEstimate") or {}
+            out[key] = {
+                "growth": (x.get("growth") or {}).get("raw"),
+                "eps": (est.get("avg") or {}).get("raw"),
+                "analysts": (est.get("numberOfAnalysts") or {}).get("raw"),
+                "endDate": x.get("endDate"),
+            }
+        g0, g1 = out["thisYear"]["growth"], out["nextYear"]["growth"]
+        ok = all(isinstance(g, (int, float)) and g > -1 for g in (g0, g1))
+        out["growth"] = ((1 + g0) * (1 + g1)) ** 0.5 - 1 if ok else None
+        return out if out["growth"] is not None else None
+    except Exception:  # estimates are optional: the analysis still runs on history alone
+        _yahoo["crumb"] = None
+        return None
+
+
 def prices(ticker):
     def produce():
         monthly = yahoo_chart(ticker, "15y", "1mo")
@@ -197,6 +253,7 @@ def prices(ticker):
             "exchange": meta.get("fullExchangeName"),
             "asOf": meta.get("regularMarketTime"),
             "splits": splits,
+            "analyst": analyst_estimate(ticker),
             "monthly": [{"t": t, "close": c} for t, c in zip(monthly.get("timestamp", []), mq["close"]) if c is not None],
             "daily": [
                 {"t": t, "h": h, "l": l, "c": c}

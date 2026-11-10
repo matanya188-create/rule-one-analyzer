@@ -294,7 +294,7 @@ export function ruleGrowth(big5, analystGrowth) {
 
 export function stickerPrice({ eps, growth, historicalPe, peOverride, marr = DEFAULTS.marr, years = DEFAULTS.years, mosFraction = DEFAULTS.mosFraction }) {
   if (!(eps > 0)) return { ok: false, reason: 'הרווח למניה האחרון שלילי או חסר — אי אפשר לחשב מחיר לפי הספר' };
-  if (growth == null || !(growth > 0)) return { ok: false, reason: 'אין צמיחה חיובית בהון העצמי — אי אפשר לחשב מחיר לפי הספר' };
+  if (growth == null || !(growth > 0)) return { ok: false, reason: 'שיעור הצמיחה לפי הספר אינו חיובי (ההון העצמי לא גדל, או שהאנליסטים צופים ירידה ברווח), ולכן אי אפשר לחשב מחיר' };
   const defaultPe = growth * 100 * 2;
   let futurePe, peSource;
   if (peOverride > 0) { futurePe = peOverride; peSource = 'הוזן ידנית'; }
@@ -459,7 +459,8 @@ export function analyze({ facts, splits, monthly, daily, price, analystGrowth = 
   const warnings = [];
   if (growth?.capped) warnings.push(`צמיחת ההון ההיסטורית היא ${(growth.raw * 100).toFixed(1)}% בשנה, אבל החישוב משתמש ב-${(DEFAULTS.growthCap * 100).toFixed(0)}%: טאון לא מרשה להניח יותר מזה, כי כמעט אף חברה לא מחזיקה קצב גבוה יותר 10 שנים.`);
   if (sticker.ok && sticker.growth > DEFAULTS.growthCap + 1e-9) warnings.push(`הוזנה צמיחה של ${(sticker.growth * 100).toFixed(1)}%, מעל התקרה של טאון (${(DEFAULTS.growthCap * 100).toFixed(0)}%). המחיר רגיש מאוד להנחה הזו.`);
-  if (sticker.ok && analystGrowth == null && growthOverride == null) warnings.push('החישוב נשען רק על הצמיחה ההיסטורית. לפי הספר לוקחים את הנמוך בין ההיסטוריה להערכת האנליסטים ל-5 שנים. אם יש לך הערכה כזו, הזן אותה למטה.');
+  if (analystGrowth != null && growthOverride == null && growth && !growth.capped && growth.source === 'הערכת אנליסטים') warnings.push(`הצמיחה בחישוב היא הערכת האנליסטים (${(analystGrowth * 100).toFixed(1)}%), כי היא נמוכה מהצמיחה ההיסטורית. ההערכה היא לשנתיים הקרובות ולא ל-5 שנים כמו בספר, כי אין מקור חופשי לתחזית של 5 שנים.`);
+  if (sticker.ok && analystGrowth == null && growthOverride == null) warnings.push('החישוב נשען רק על הצמיחה ההיסטורית. לפי הספר לוקחים את הנמוך בין ההיסטוריה להערכת האנליסטים ל-5 שנים. למניה הזו אין הערכת אנליסטים זמינה; אם יש לך, הזן אותה למטה.');
   if (ttm.quarters > 0 && last.eps > 0 && (ttm.value / last.eps > 2 || ttm.value / last.eps < 0.5)) warnings.push(`הרווח למניה ב-12 החודשים האחרונים (${fmtUsd(ttm.value)}) רחוק מאוד מהדוח השנתי האחרון (${fmtUsd(last.eps)}). כנראה יש אירוע חד-פעמי, והמחיר שמחושב ממנו פחות אמין.`);
   if (last.capexMissing) warnings.push('החברה לא מדווחת השקעות הוניות בתג הסטנדרטי, ולכן התזרים החופשי כאן הוא התזרים התפעולי כולו, והוא מוטה כלפי מעלה.');
   if (rows.some((r) => r.sharesRescaled)) warnings.push('בחלק מהשנים מספר המניות דווח באלפים או במיליונים, ותוקן אוטומטית לפי הרווח הנקי והרווח למניה.');

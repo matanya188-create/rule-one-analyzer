@@ -143,7 +143,8 @@ function run() {
   const analyst = parseParam(q.analyst), growth = parseParam(q.growth), pe = parseParam(q.pe), marr = parseParam(q.marr);
   return analyze({
     facts: c.facts, splits: p.splits, monthly: p.monthly, daily: p.daily, price: p.price,
-    analystGrowth: analyst != null ? analyst / 100 : null,
+    // Typed value wins; otherwise the consensus that came with the prices (when there is one).
+    analystGrowth: analyst != null ? analyst / 100 : (p.analyst?.growth ?? null),
     growthOverride: growth != null ? growth / 100 : null,
     peOverride: pe,
     marr: marr > 0 ? marr / 100 : DEFAULTS.marr,
@@ -250,7 +251,7 @@ function bigFiveCard(a) {
 function stickerCard(a) {
   const s = a.sticker, q = state.params;
   const params = `<div class="params">
-    <div><label for="p-analyst">הערכת צמיחה של אנליסטים (%)</label><input id="p-analyst" inputmode="decimal" value="${esc(q.analyst)}" placeholder="לא חובה"></div>
+    <div><label for="p-analyst">הערכת צמיחה של אנליסטים (%)</label><input id="p-analyst" inputmode="decimal" value="${esc(q.analyst)}" placeholder="${state.prices.analyst?.growth != null ? `אוטומטי: ${(state.prices.analyst.growth * 100).toFixed(1)}` : 'אין הערכה'}"></div>
     <div><label for="p-growth">דריסת צמיחה ידנית (%)</label><input id="p-growth" inputmode="decimal" value="${esc(q.growth)}" placeholder="אוטומטי"></div>
     <div><label for="p-pe">מכפיל עתידי ידני</label><input id="p-pe" inputmode="decimal" value="${esc(q.pe)}" placeholder="אוטומטי"></div>
     <div><label for="p-marr">תשואה מינימלית (%)</label><input id="p-marr" inputmode="decimal" value="${esc(q.marr)}"></div>
@@ -263,6 +264,7 @@ function stickerCard(a) {
         `דוח שנתי ${a.last.fy} ($${num(a.ttm.parts.annual)}) + ${a.ttm.quarters} רבעונים ($${num(a.ttm.parts.ytd)}) − אותם רבעונים אשתקד ($${num(a.ttm.parts.prior)}). נכון ל-${new Date(a.ttm.asOf).toLocaleDateString('he-IL')}`]
       : ['רווח למניה אחרון (EPS)', `$${num(s.eps)}`, a.ttm.note || `דוח שנתי ${a.last.fy}. עוד אין דוח רבעוני חדש יותר`],
     ['שיעור צמיחה לפי הספר', pct(s.growth), `${a.growth?.source || ''}. הנמוך בין ההיסטוריה להערכת האנליסטים, ולא יותר מ-15%`],
+    analystStep(),
     [`רווח למניה בעוד ${s.years} שנים`, `$${num(s.futureEps)}`, `EPS × (1 + צמיחה)^${s.years}`],
     ['מכפיל עתידי', num(s.futurePe, 1), `${s.peSource}. פי 2 מהצמיחה = ${num(s.defaultPe, 1)}, היסטורי = ${num(a.hpe.average, 1)}, תקרה = 50`],
     [`מחיר עתידי בעוד ${s.years} שנים`, fmtUsd(s.futurePrice), 'EPS עתידי × מכפיל'],
@@ -272,6 +274,15 @@ function stickerCard(a) {
   return `<section class="card"><h2>מחיר הסטיקר, צעד אחר צעד</h2>
     <ul class="steps">${steps.map(([l, v, n]) => `<li><span>${esc(l)}<small>${bidi(n || '')}</small></span><b>${bidi(v)}</b></li>`).join('')}</ul>
     ${params}</section>`;
+}
+
+// One row explaining where the analysts' figure came from.
+function analystStep() {
+  const typed = parseParam(state.params.analyst), an = state.prices.analyst;
+  if (typed != null) return ['הערכת אנליסטים', pct(typed / 100), 'הוזנה ידנית'];
+  if (!an || an.growth == null) return ['הערכת אנליסטים', '—', 'אין הערכה זמינה למניה הזו. החישוב נשען על ההיסטוריה בלבד'];
+  const y = (x) => `${String(x.endDate || '').slice(0, 4)}: $${num(x.eps)} (${pct(x.growth)}, ${x.analysts ?? '?'} אנליסטים)`;
+  return ['הערכת אנליסטים (ממוצע שנתי לשנתיים)', pct(an.growth), `תחזית רווח למניה מ-Yahoo. ${y(an.thisYear)}; ${y(an.nextYear)}`];
 }
 
 function extrasCard(a) {
