@@ -48,6 +48,8 @@ NEEDED = {
     "LongTermDebtNoncurrent", "LongTermDebt", "LongTermDebtAndCapitalLeaseObligations",
     "WeightedAverageNumberOfDilutedSharesOutstanding", "WeightedAverageNumberOfShareOutstandingBasicAndDiluted",
     "WeightedAverageNumberOfSharesOutstandingBasic",
+    "PaymentsOfDividendsCommonStock", "PaymentsOfDividends", "PaymentsOfOrdinaryDividends",
+    "PaymentsForRepurchaseOfCommonStock", "PaymentsForRepurchaseOfEquity",
 }
 
 

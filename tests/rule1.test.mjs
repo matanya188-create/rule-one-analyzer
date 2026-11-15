@@ -178,3 +178,32 @@ test('paybackPrice and impliedGrowth', async () => {
   const s = stickerPrice({ eps: 5, growth: 0.12, historicalPe: 40 });
   assert.ok(Math.abs(impliedGrowth({ price: s.sticker, eps: 5, historicalPe: 40 }) - 0.12) < 1e-4);
 });
+
+test('equity growth adds back the dividends paid along the way', async () => {
+  const { bigFive } = await import('../public/rule1.js');
+  const rows = [];
+  for (let i = 0; i <= 10; i++) rows.push({ fy: 2010 + i, revenue: 1, eps: 1, bvps: 10, equity: 100, divPs: 2, fcf: 1, roic: 0.2 });
+  const bv = bigFive(rows).find((m) => m.key === 'bvps');
+  close(bv.main.value, Math.pow(30 / 10, 1 / 10) - 1); // flat book value + $20 of dividends
+  assert.equal(bv.status, 'pass');
+});
+
+test('equity shrunk by buybacks is set aside, and growth falls back to EPS', async () => {
+  const { bigFive, ruleGrowth } = await import('../public/rule1.js');
+  const rows = [];
+  for (let i = 0; i <= 10; i++) rows.push({ fy: 2010 + i, revenue: 1, eps: Math.pow(1.12, i), bvps: 10 - i * 0.5, equity: 100 - i * 5, buybacks: 20, divPs: 0, fcf: 1, roic: 0.2 });
+  const b5 = bigFive(rows), bv = b5.find((m) => m.key === 'bvps');
+  assert.equal(bv.status, 'distorted');
+  close(ruleGrowth(b5, null).value, 0.12);
+  // without buybacks the same shrinking equity is a plain failure
+  assert.equal(bigFive(rows.map((r) => ({ ...r, buybacks: 0 }))).find((m) => m.key === 'bvps').status, 'fail');
+});
+
+test('a 10-year pass that one end-year decides is marked borderline', async () => {
+  const { bigFive } = await import('../public/rule1.js');
+  const rows = [];
+  // flat for 10 years, then one jump in the last year: 10y rate passes, the neighbours do not
+  for (let i = 0; i <= 11; i++) rows.push({ fy: 2010 + i, revenue: i === 11 ? 300 : 100, eps: 1, bvps: 1, fcf: 1, roic: 0.2 });
+  const rev = bigFive(rows).find((m) => m.key === 'revenue');
+  assert.equal(rev.status, 'pass'); assert.equal(rev.borderline, true);
+});

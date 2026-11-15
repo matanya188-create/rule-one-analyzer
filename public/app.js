@@ -165,13 +165,14 @@ function verdictCard(a, c, p) {
     ['מחיר נוכחי', fmtUsd(a.price)],
     ['מחיר קנייה (מרווח ביטחון)', s.ok ? fmtUsd(s.mos) : '—'],
     ['מחיר סטיקר (שווי)', s.ok ? fmtUsd(s.sticker) : '—'],
-    ['חמשת המספרים', `${a.b5pass} / 5`],
+    ['חמשת המספרים', `${a.b5pass} / ${a.b5distorted ? 4 : 5}`],
   ];
   return `<section class="card verdict v-${a.verdict.code}">
     <div class="row"><div><div class="name">${esc(c.name)} <span class="tk ltr">${esc(c.ticker)}</span></div>
     <div class="muted">${esc(p.exchange || '')} · דוח שנתי אחרון: ${esc(a.last.end || a.last.fy)}${p.asOf ? ` · מחיר נכון ל-${esc(new Date(p.asOf * 1000).toLocaleDateString('he-IL'))}` : ''}</div></div></div>
     <div class="badge">${esc(a.verdict.title)}</div>
     <div>${bidi(a.verdict.text)}</div>
+    ${a.flags.length ? `<ul class="flags">${a.flags.map((w) => `<li>${bidi(w)}</li>`).join('')}</ul>` : ''}
     ${s.ok ? scale(a) : ''}
     <div class="kpis">${kpis.map(([l, v]) => `<div class="kpi"><div class="l">${l}</div><div class="v">${esc(v)}</div></div>`).join('')}</div>
     ${a.warnings.length ? `<ul class="warns">${a.warnings.map((w) => `<li>${bidi(w)}</li>`).join('')}</ul>` : ''}
@@ -213,7 +214,7 @@ function valuationCard(a) {
     ['Ten Cap (פי 10 מהתזרים החופשי)', a.tenCap, `תזרים חופשי למניה $${num(a.fcfPs)} בדוח השנתי האחרון, כפול 10. מחיר שנותן תשואת-מזומן של 10% בשנה.`],
     ['Payback Time (החזר ב-8 שנים)', a.pbPrice, `סכום התזרים החופשי למניה ב-8 השנים הבאות, כשהוא גדל ב-${pct(g)} בשנה.`],
   ];
-  const cheap = methods.filter(([, v]) => v != null && price <= v).length, known = methods.filter(([, v]) => v != null).length;
+  const cheap = a.cheapCount, known = a.methods.filter((m) => m.value != null).length;
   const pe = a.pe;
   const ctx = [];
   if (a.implied != null) ctx.push(['הצמיחה שהמחיר מגלם', pct(a.implied), `כדי שהמחיר של היום יהיה שווה לסטיקר, הרווח צריך לגדול בקצב הזה 10 שנים. לפי הספר מניחים ${pct(g)}.`, g != null ? a.implied <= g : null]);
@@ -221,7 +222,7 @@ function valuationCard(a) {
   if (a.fcfPs > 0) ctx.push(['תשואת תזרים חופשי', pct(a.fcfPs / price), 'תזרים חופשי למניה חלקי המחיר. Ten Cap דורש 10% לפחות.', a.fcfPs / price >= 0.1]);
   const sc = a.scenarios.filter((x) => x.ok);
   return `<section class="card"><h2>איפה המחיר עומד: שלוש שיטות התמחור של טאון</h2>
-    <p class="muted" style="margin-top:-6px">טאון מחשב שלושה מחירי קנייה ורוצה שהמחיר בשוק יהיה מתחת לכולם. כאן המחיר של היום (${bidi(fmtUsd(price))}) נמוך מ-${cheap} מתוך ${known}.</p>
+    <p class="muted" style="margin-top:-6px">טאון מחשב שלושה מחירי קנייה. כששתי שיטות לפחות מסכימות אפשר לסמוך על המחיר, וכשאחת רחוקה מהאחרות זה דגל אדום. כאן המחיר של היום (${bidi(fmtUsd(price))}) נמוך מ-${cheap} מתוך ${known} שניתנות לחישוב. הפסיקה "זולה" דורשת שתיים לפחות, כולל מרווח הביטחון.</p>
     <div class="scroll"><table class="val"><tr><th>שיטה</th><th>מחיר קנייה מרבי</th><th>המחיר היום מול זה</th></tr>
     ${methods.map(([l, v, n]) => row(l, v, n, v != null && price <= v)).join('')}
     ${s.ok ? row('מחיר הסטיקר (השווי המלא)', s.sticker, 'מעל המחיר הזה המניה יקרה לפי הספר, וזה גם מחיר המכירה.', price <= s.sticker) : ''}</table></div>
@@ -235,16 +236,16 @@ function valuationCard(a) {
 
 function bigFiveCard(a) {
   const head = `<tr><th>מדד</th>${[10, 5, 3, 1].map((n) => `<th>${n === 1 ? 'שנה' : n + ' שנים'}</th>`).join('')}<th>מצב</th><th>מגמה</th></tr>`;
-  const st = { pass: ['ok', 'עובר'], fail: ['no', 'נכשל'], unknown: ['na', 'אין נתון'] };
+  const st = { pass: ['ok', 'עובר'], fail: ['no', 'נכשל'], unknown: ['na', 'אין נתון'], distorted: ['mix', 'מעוות, לא נספר'] };
   const tr = { steady: ['ok', 'יציבה'], recovering: ['mix', 'מתאוששת'], weakening: ['mix', 'נחלשת'] };
   const rows = a.big5.map((m) => `<tr><td>${esc(m.label)}${m.mode === 'average' ? '<small class="muted"> (ממוצע)</small>' : ''}</td>
     ${m.windows.map((w) => `<td><span class="cell num ${w.negative ? 'no' : w.value == null ? 'na' : w.pass ? 'ok' : 'no'}${w === m.main ? ' main' : ''}" title="${esc(w.reason || '')}">${w.negative ? 'שלילי' : pct(w.value)}</span></td>`).join('')}
-    <td><span class="cell ${st[m.status][0]}">${st[m.status][1]}</span></td>
+    <td><span class="cell ${st[m.status][0]}">${st[m.status][1]}</span>${m.borderline && m.status !== 'distorted' ? '<small class="muted"> גבולי</small>' : ''}</td>
     <td>${m.trend ? `<span class="cell ${tr[m.trend][0]}">${tr[m.trend][1]}</span>` : '<span class="cell na">—</span>'}</td></tr>`).join('');
   return `<section class="card"><h2>חמשת המספרים הגדולים: האם זה עסק נהדר</h2>
-    <p class="muted" style="margin-top:-6px">לפי הספר כל מספר צריך להיות לפחות 10% בשנה לאורך 10 שנים. זה המבחן (התא עם המסגרת). החלונות הקצרים מראים אם הקצב נשמר, וקובעים את המגמה. ${a.b5pass} מתוך 5 עוברים, ו-${a.b5consistent} מהם עוברים בכל החלונות.</p>
+    <p class="muted" style="margin-top:-6px">לפי הספר כל מספר צריך להיות לפחות 10% בשנה לאורך 10 שנים. זה המבחן (התא עם המסגרת). החלונות הקצרים מראים אם הקצב נשמר, וקובעים את המגמה. ${a.b5pass} מתוך ${a.b5distorted ? 4 : 5} עוברים, ו-${a.b5consistent} מהם עוברים בכל החלונות.</p>
     <div class="scroll"><table class="bf">${head}${rows}</table></div>
-    <p class="note">צמיחה = קצב שנתי ממוצע (CAGR) מהשנה הבסיסית עד הדוח האחרון. ROIC = רווח תפעולי אחרי מס חלקי (הון עצמי + חוב לטווח ארוך). כשאין 10 שנות נתונים, המבחן הוא החלון הארוך ביותר שיש. ערך שלילי בתחילת התקופה או בסופה מסומן "שלילי". תא אפור = אין מספיק היסטוריה.</p>
+    <p class="note">צמיחה = קצב שנתי ממוצע (CAGR) מהשנה הבסיסית עד הדוח האחרון. ROIC = רווח תפעולי אחרי מס חלקי (הון עצמי + חוב לטווח ארוך). כשאין 10 שנות נתונים, המבחן הוא החלון הארוך ביותר שיש. ההון העצמי נמדד יחד עם הדיבידנדים ששולמו בדרך, כמו אצל טאון. "גבולי" = מדידה סמוכה (שנה פחות, או אותה תקופה שנה קודם) נותנת תוצאה הפוכה. "מעוות" = ההון קטן בגלל רכישות עצמיות, ואז המדד לא נספר ונדרשים כל ארבעת האחרים. ערך שלילי בתחילת התקופה או בסופה מסומן "שלילי". תא אפור = אין מספיק היסטוריה.</p>
   </section>`;
 }
 
@@ -260,7 +261,7 @@ function stickerCard(a) {
     <p class="note">אפשר להזין צמיחה ידנית כדי לראות מה היה המחיר בהנחה אחרת.</p>${params}</section>`;
   const steps = [
     a.ttm.quarters > 0
-      ? ['רווח למניה ב-12 החודשים האחרונים (TTM)', `$${num(s.eps)}`,
+      ? [a.ttmOdd ? 'רווח למניה (הנמוך בין 12 החודשים האחרונים לדוח השנתי)' : 'רווח למניה ב-12 החודשים האחרונים (TTM)', `$${num(s.eps)}`,
         `דוח שנתי ${a.last.fy} ($${num(a.ttm.parts.annual)}) + ${a.ttm.quarters} רבעונים ($${num(a.ttm.parts.ytd)}) − אותם רבעונים אשתקד ($${num(a.ttm.parts.prior)}). נכון ל-${new Date(a.ttm.asOf).toLocaleDateString('he-IL')}`]
       : ['רווח למניה אחרון (EPS)', `$${num(s.eps)}`, a.ttm.note || `דוח שנתי ${a.last.fy}. עוד אין דוח רבעוני חדש יותר`],
     ['שיעור צמיחה לפי הספר', pct(s.growth), `${a.growth?.source || ''}. הנמוך בין ההיסטוריה להערכת האנליסטים, ולא יותר מ-15%`],

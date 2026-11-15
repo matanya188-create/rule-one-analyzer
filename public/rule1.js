@@ -31,11 +31,13 @@ export const CONCEPTS = {
     'IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments'],
   tax: ['IncomeTaxExpenseBenefit'],
   ltDebt: ['LongTermDebtNoncurrent', 'LongTermDebt', 'LongTermDebtAndCapitalLeaseObligations'],
+  dividends: ['PaymentsOfDividendsCommonStock', 'PaymentsOfDividends', 'PaymentsOfOrdinaryDividends'],
+  buybacks: ['PaymentsForRepurchaseOfCommonStock', 'PaymentsForRepurchaseOfEquity'],
   shares: ['WeightedAverageNumberOfDilutedSharesOutstanding', 'WeightedAverageNumberOfShareOutstandingBasicAndDiluted',
     'WeightedAverageNumberOfSharesOutstandingBasic'],
 };
 
-const FLOW = new Set(['revenue', 'netIncome', 'eps', 'opCash', 'capex', 'opIncome', 'pretax', 'tax', 'shares']);
+const FLOW = new Set(['revenue', 'netIncome', 'eps', 'opCash', 'capex', 'opIncome', 'pretax', 'tax', 'shares', 'dividends', 'buybacks']);
 const ANNUAL_FORMS = new Set(['10-K', '10-K/A', '10-KT']);
 const DAY = 86400000;
 
@@ -172,6 +174,7 @@ export function buildYears(facts, splits) {
       equity: val(s.equity, fy), opCash: val(s.opCash, fy), capex: val(s.capex, fy),
       opIncome: val(s.opIncome, fy), pretax: val(s.pretax, fy), tax: val(s.tax, fy),
       ltDebt: val(s.ltDebt, fy), shares: val(s.shares, fy),
+      dividends: val(s.dividends, fy), buybacks: val(s.buybacks, fy),
     };
     // Some filers tag the share count in thousands or millions; EPS and net income give the true scale.
     if (r.shares && r.netIncome && r.eps && Math.abs(r.eps) >= 0.02) {
@@ -202,6 +205,7 @@ export function buildYears(facts, splits) {
       }
     }
   }
+  for (const r of out) r.divPs = r.dividends > 0 && r.shares ? r.dividends / r.shares : 0;
   return out;
 }
 
@@ -214,13 +218,26 @@ export function cagr(start, end, n) {
 
 export const WINDOWS = [10, 5, 3, 1];
 
+// Growth of `key` between two fiscal years. For equity, Town's number is "book value per
+// share plus dividends": the dividends paid along the way are surplus the business created,
+// so they are added back to the ending value.
+function growthBetween(byFy, key, fromFy, toFy) {
+  const base = byFy.get(fromFy), end = byFy.get(toFy);
+  if (!base || !end) return { value: null, reason: 'אין מספיק היסטוריה' };
+  let endVal = end[key];
+  if (key === 'bvps' && endVal != null) for (let fy = fromFy + 1; fy <= toFy; fy++) endVal += byFy.get(fy)?.divPs || 0;
+  return cagr(base[key], endVal, toFy - fromFy);
+}
+
 function growthWindows(rows, key) {
   const last = rows[rows.length - 1];
   const byFy = new Map(rows.map((r) => [r.fy, r]));
   return WINDOWS.map((n) => {
-    const base = byFy.get(last.fy - n);
-    if (!base) return { n, value: null, reason: 'אין מספיק היסטוריה' };
-    return { n, ...cagr(base[key], last[key], n) };
+    const w = { n, ...growthBetween(byFy, key, last.fy - n, last.fy) };
+    // Two neighbouring measurements of the same long-term rate (one year shorter, and the same
+    // length ending a year earlier): when they disagree with the window, one odd year decides it.
+    w.alts = n >= 5 ? [growthBetween(byFy, key, last.fy - n + 1, last.fy), growthBetween(byFy, key, last.fy - n - 1, last.fy - 1)] : [];
+    return w;
   });
 }
 
@@ -236,7 +253,7 @@ export const BIG_FIVE = [
   { key: 'roic', label: 'תשואה על ההון המושקע (ROIC)', mode: 'average' },
   { key: 'revenue', label: 'צמיחה במכירות', mode: 'growth' },
   { key: 'eps', label: 'צמיחה ברווח למניה (EPS)', mode: 'growth' },
-  { key: 'bvps', label: 'צמיחה בהון העצמי למניה (BVPS)', mode: 'growth' },
+  { key: 'bvps', label: 'צמיחה בהון העצמי למניה, כולל דיבידנדים (BVPS)', mode: 'growth' },
   { key: 'fcf', label: 'צמיחה בתזרים המזומנים החופשי (FCF)', mode: 'growth' },
 ];
 
@@ -249,12 +266,24 @@ export function bigFive(rows, min = DEFAULTS.bigFiveMin) {
     // The book's test is the long-term rate (10 years when available); the shorter windows
     // show whether it is holding up, so they set the trend, not the verdict.
     const main = known[0] || null;
-    const status = !main ? 'unknown' : main.pass ? 'pass' : 'fail';
+    let status = !main ? 'unknown' : main.pass ? 'pass' : 'fail';
+    const min10 = (w) => (w.value != null ? w.value >= min : w.negative ? false : null);
+    const borderline = !!main && (main.alts || []).some((x) => min10(x) != null && min10(x) !== main.pass);
+    // Buybacks shrink equity without the business getting worse; the book has no fix for that,
+    // so a failing equity number is set aside (not counted for or against) instead of trusted.
+    let distorted = false;
+    if (m.key === 'bvps' && status === 'fail') {
+      const last = rows[rows.length - 1];
+      const span = rows.filter((r) => r.fy > last.fy - main.n);
+      const bought = span.reduce((a, r) => a + (r.buybacks > 0 ? r.buybacks : 0), 0);
+      distorted = !(last.equity > 0) || bought > 0.5 * last.equity;
+      if (distorted) status = 'distorted';
+    }
     const recent = known.slice(1);
     const trend = !main || !recent.length ? null
       : recent.every((w) => w.pass) ? 'steady'
         : recent[recent.length - 1].pass ? 'recovering' : 'weakening';
-    return { ...m, windows, passed, known: known.length, status, main, trend, consistent: known.length > 0 && passed === known.length };
+    return { ...m, windows, passed, known: known.length, status, main, trend, borderline, distorted, consistent: known.length > 0 && passed === known.length };
   });
 }
 
@@ -281,10 +310,16 @@ export function historicalPE(rows, monthly, splits) {
 
 // Rule #1 growth rate: lower of historical equity (BVPS) growth and analyst estimate (if given).
 export function ruleGrowth(big5, analystGrowth) {
-  const eq = big5.find((m) => m.key === 'bvps').windows;
-  const hist = eq.find((w) => w.value != null) || null; // longest available window first (10,5,3,1)
+  const bv = big5.find((m) => m.key === 'bvps');
   const candidates = [];
-  if (hist) candidates.push({ source: `צמיחת ההון העצמי ההיסטורית (${hist.n} שנים)`, value: hist.value });
+  if (bv.distorted) {
+    // Equity is unusable here, so the historical side is the earnings-per-share growth instead.
+    const e = big5.find((m) => m.key === 'eps').main;
+    if (e && e.value != null) candidates.push({ source: `צמיחת הרווח למניה ההיסטורית (${e.n} שנים), כי ההון העצמי מעוות מרכישות עצמיות`, value: e.value });
+  } else {
+    const hist = bv.windows.find((w) => w.value != null) || null; // longest available window first (10,5,3,1)
+    if (hist) candidates.push({ source: `צמיחת ההון העצמי ההיסטורית (${hist.n} שנים)`, value: hist.value });
+  }
   if (analystGrowth != null && Number.isFinite(analystGrowth)) candidates.push({ source: 'הערכת אנליסטים', value: analystGrowth });
   if (!candidates.length) return null;
   const low = candidates.reduce((a, b) => (b.value < a.value ? b : a));
@@ -428,46 +463,74 @@ export function analyze({ facts, splits, monthly, daily, price, analystGrowth = 
   // Town values the business on trailing-twelve-month EPS, not just the last annual report.
   const epsAnnual = annualSeries(facts, 'eps', splits).get(last.fy);
   const ttm = epsAnnual ? ttmValue(facts, 'eps', splits, epsAnnual) : { value: last.eps, quarters: 0, asOf: last.end };
-  const sticker = stickerPrice({ eps: ttm.value, growth: growth?.value, historicalPe: hpe.average, peOverride, marr });
+  // A trailing figure far from the annual one usually carries a one-off item: price the lower of the two.
+  const ttmOdd = ttm.quarters > 0 && last.eps > 0 && (ttm.value / last.eps > 2 || ttm.value / last.eps < 0.5);
+  const epsUsed = ttmOdd ? Math.min(ttm.value, last.eps) : ttm.value;
+  const sticker = stickerPrice({ eps: epsUsed, growth: growth?.value, historicalPe: hpe.average, peOverride, marr });
   const fcfPs = last.fcf != null && last.shares ? last.fcf / last.shares : null;
   const payback = paybackYears(price, fcfPs, growth?.value);
   // The three valuations of "Invested": Margin of Safety (sticker / 2), Ten Cap, Payback Time.
   const tenCap = fcfPs > 0 ? fcfPs * DEFAULTS.tenCapMultiple : null;
   const pbPrice = paybackPrice(fcfPs, growth?.value);
-  const implied = impliedGrowth({ price, eps: ttm.value, historicalPe: hpe.average, marr });
+  const implied = impliedGrowth({ price, eps: epsUsed, historicalPe: hpe.average, marr });
   const pes = hpe.points.map((x) => x.pe).sort((x, y) => x - y);
-  const pe = { current: ttm.value > 0 ? price / ttm.value : null, median: hpe.average, low: pes[0] ?? null, high: pes[pes.length - 1] ?? null };
-  const scenarios = ttm.value > 0 ? [0.05, 0.10, 0.15].map((g) => ({ ...stickerPrice({ eps: ttm.value, growth: g, historicalPe: hpe.average, marr }), growth: g })) : [];
+  const pe = { current: epsUsed > 0 ? price / epsUsed : null, median: hpe.average, low: pes[0] ?? null, high: pes[pes.length - 1] ?? null };
+  const scenarios = epsUsed > 0 ? [0.05, 0.10, 0.15].map((g) => ({ ...stickerPrice({ eps: epsUsed, growth: g, historicalPe: hpe.average, marr }), growth: g })) : [];
   const debtYears = last.ltDebt != null && last.fcf > 0 ? last.ltDebt / last.fcf : null;
   const tech = townTools(daily);
 
   const b5pass = big5.filter((m) => m.status === 'pass').length;
   const b5fail = big5.filter((m) => m.status === 'fail').length;
+  // An equity number set aside as distorted leaves four; all four must then pass.
   const wonderful = b5pass >= 4;
+  const b5distorted = big5.some((m) => m.distorted);
+  const borderline = big5.filter((m) => m.borderline && m.status !== 'distorted');
+  // Would the "wonderful" answer change if the borderline numbers fell the other way?
+  const b5fragile = borderline.length > 0 && (wonderful
+    ? b5pass - borderline.filter((m) => m.status === 'pass').length < 4
+    : b5pass + borderline.filter((m) => m.status === 'fail').length >= 4);
+
+  // The three buy prices. Free-cash-flow methods are not counted when capex is unreported.
+  const fcfOk = !last.capexMissing;
+  const methods = [
+    { key: 'mos', value: sticker.ok ? sticker.mos : null },
+    { key: 'tenCap', value: fcfOk ? tenCap : null },
+    { key: 'payback', value: fcfOk ? pbPrice : null },
+  ].map((m) => ({ ...m, cheap: m.value != null && price <= m.value }));
+  const cheapCount = methods.filter((m) => m.cheap).length;
+
+  const flags = [];
+  if (fcfPs != null && fcfPs <= 0) flags.push('התזרים החופשי בדוח השנתי האחרון שלילי, כך ששתי שיטות התמחור האחרות (Ten Cap ו-Payback Time) לא ניתנות לחישוב');
+  else if (!fcfOk) flags.push('החברה לא מדווחת השקעות הוניות, ולכן אי אפשר לאמת את המחיר מול התזרים החופשי');
+  if (debtYears != null && debtYears > DEFAULTS.debtMaxYearsFcf) flags.push(`החוב לטווח ארוך שווה ל-${debtYears.toFixed(1)} שנות תזרים חופשי, מעל ${DEFAULTS.debtMaxYearsFcf} השנים שטאון מרשה`);
+  else if (last.ltDebt > 0 && last.fcf != null && last.fcf <= 0) flags.push('יש חוב לטווח ארוך ואין תזרים חופשי חיובי לפרוע אותו');
+  if (ttmOdd) flags.push(`הרווח למניה ב-12 החודשים האחרונים (${fmtUsd(ttm.value)}) רחוק מאוד מהדוח השנתי האחרון (${fmtUsd(last.eps)}), כנראה בגלל אירוע חד-פעמי. המחיר חושב לפי הנמוך מהשניים`);
+  if (wonderful && b5fragile) flags.push(`הקביעה "עסק נהדר" גבולית: ${borderline.map((m) => m.label.split(' (')[0].split(',')[0]).join(', ')} עוברים או נכשלים לפי שנה בודדת בקצה התקופה`);
   const b5consistent = big5.filter((m) => m.consistent).length;
 
   const b5unknown = big5.filter((m) => m.status === 'unknown').length;
 
   let verdict;
   if (b5unknown >= 2) verdict = { code: 'no-price', title: 'אין מספיק נתונים לפסיקה', text: `${b5unknown} מתוך 5 המספרים הגדולים חסרים, כי החברה לא מדווחת אותם בפורמט הסטנדרטי של ה-SEC (למשל רווח למניה). אי אפשר לבדוק אותה לפי הספר בכלי הזה.` };
-  else if (!wonderful) verdict = { code: 'not-wonderful', title: 'לא עומדת בכללי הספר', text: `רק ${b5pass} מתוך 5 המספרים הגדולים עוברים את רף ה-10% לשנה בטווח הארוך. לפי טאון, אם העסק לא נהדר, המחיר לא משנה.` };
+  else if (!wonderful) verdict = { code: 'not-wonderful', title: 'לא עומדת בכללי הספר', text: `רק ${b5pass} מתוך ${b5distorted ? 4 : 5} המספרים הגדולים עוברים את רף ה-10% לשנה בטווח הארוך${b5distorted ? ' (ההון העצמי לא נספר, כי רכישות עצמיות מעוותות אותו, ואז נדרשים כל ארבעת האחרים)' : ''}. לפי טאון, אם העסק לא נהדר, המחיר לא משנה.${b5fragile ? ' שים לב: התוצאה גבולית, ושנה בודדת בקצה התקופה מכריעה אותה.' : ''}` };
   else if (!sticker.ok) verdict = { code: 'no-price', title: 'עסק טוב — אבל אי אפשר לתמחר', text: sticker.reason };
-  else if (price <= sticker.mos) verdict = { code: 'buy', title: 'זולה — שווה קנייה לפי הספר', text: `המחיר ${fmtUsd(price)} נמוך ממחיר מרווח-הביטחון ${fmtUsd(sticker.mos)}.` };
+  else if (price <= sticker.mos && cheapCount >= 2 && !flags.length) verdict = { code: 'buy', title: 'זולה — שווה קנייה לפי הספר', text: `המחיר ${fmtUsd(price)} נמוך ממחיר מרווח-הביטחון ${fmtUsd(sticker.mos)}, ו-${cheapCount} מתוך 3 שיטות התמחור מסכימות שהיא זולה.` };
+  else if (price <= sticker.mos) verdict = { code: 'caution', title: 'זולה לפי הסטיקר — אבל לא נקייה', text: `המחיר ${fmtUsd(price)} נמוך ממחיר מרווח-הביטחון ${fmtUsd(sticker.mos)}, אבל ${cheapCount < 2 ? 'רק שיטת תמחור אחת מתוך 3 מראה שהיא זולה' : 'יש דגל אדום'}. לפי הספר בודקים את זה לפני שקונים.` };
   else if (price <= sticker.sticker) verdict = { code: 'fair', title: 'מחיר הוגן — אין מרווח ביטחון', text: `המחיר מתחת לשווי (${fmtUsd(sticker.sticker)}) אבל מעל מחיר הקנייה (${fmtUsd(sticker.mos)}). לפי הספר — מחכים.` };
   else verdict = { code: 'expensive', title: 'יקרה — לא שווה קנייה', text: `המחיר ${fmtUsd(price)} גבוה מהשווי לפי הספר (${fmtUsd(sticker.sticker)}).` };
 
   const warnings = [];
-  if (growth?.capped) warnings.push(`צמיחת ההון ההיסטורית היא ${(growth.raw * 100).toFixed(1)}% בשנה, אבל החישוב משתמש ב-${(DEFAULTS.growthCap * 100).toFixed(0)}%: טאון לא מרשה להניח יותר מזה, כי כמעט אף חברה לא מחזיקה קצב גבוה יותר 10 שנים.`);
+  if (growth?.capped) warnings.push(`הצמיחה ההיסטורית היא ${(growth.raw * 100).toFixed(1)}% בשנה, אבל החישוב משתמש ב-${(DEFAULTS.growthCap * 100).toFixed(0)}%: טאון לא מרשה להניח יותר מזה, כי כמעט אף חברה לא מחזיקה קצב גבוה יותר 10 שנים.`);
   if (sticker.ok && sticker.growth > DEFAULTS.growthCap + 1e-9) warnings.push(`הוזנה צמיחה של ${(sticker.growth * 100).toFixed(1)}%, מעל התקרה של טאון (${(DEFAULTS.growthCap * 100).toFixed(0)}%). המחיר רגיש מאוד להנחה הזו.`);
   if (analystGrowth != null && growthOverride == null && growth && !growth.capped && growth.source === 'הערכת אנליסטים') warnings.push(`הצמיחה בחישוב היא הערכת האנליסטים (${(analystGrowth * 100).toFixed(1)}%), כי היא נמוכה מהצמיחה ההיסטורית. ההערכה היא לשנתיים הקרובות ולא ל-5 שנים כמו בספר, כי אין מקור חופשי לתחזית של 5 שנים.`);
   if (sticker.ok && analystGrowth == null && growthOverride == null) warnings.push('החישוב נשען רק על הצמיחה ההיסטורית. לפי הספר לוקחים את הנמוך בין ההיסטוריה להערכת האנליסטים ל-5 שנים. למניה הזו אין הערכת אנליסטים זמינה; אם יש לך, הזן אותה למטה.');
-  if (ttm.quarters > 0 && last.eps > 0 && (ttm.value / last.eps > 2 || ttm.value / last.eps < 0.5)) warnings.push(`הרווח למניה ב-12 החודשים האחרונים (${fmtUsd(ttm.value)}) רחוק מאוד מהדוח השנתי האחרון (${fmtUsd(last.eps)}). כנראה יש אירוע חד-פעמי, והמחיר שמחושב ממנו פחות אמין.`);
+  if (b5distorted) warnings.push('ההון העצמי של החברה קטן בגלל רכישות עצמיות של מניות, לא בגלל חולשה בעסק. לספר אין תיקון לזה, ולכן המדד הזה לא נספר: נדרשים כל ארבעת האחרים, והצמיחה בחישוב המחיר היא צמיחת הרווח למניה. זו החלטה שלנו ולא כלל מהספר.');
   if (last.capexMissing) warnings.push('החברה לא מדווחת השקעות הוניות בתג הסטנדרטי, ולכן התזרים החופשי כאן הוא התזרים התפעולי כולו, והוא מוטה כלפי מעלה.');
   if (rows.some((r) => r.sharesRescaled)) warnings.push('בחלק מהשנים מספר המניות דווח באלפים או במיליונים, ותוקן אוטומטית לפי הרווח הנקי והרווח למניה.');
   if ((splits || []).some((x) => !isShareSplit(x.ratio) && Math.abs(x.ratio - 1) > 0.01)) warnings.push('החברה פיצלה מתוכה חברה-בת (ספין-אוף). הרווח למניה בשנים שלפני הפיצול כולל את העסק שיצא, ולכן הצמיחה ההיסטורית פחות נקייה.');
   if (hpe.points.length < 5) warnings.push('יש פחות מ-5 שנים לחישוב המכפיל ההיסטורי.');
   if (rows.length < 11) warnings.push(`יש רק ${rows.length} דוחות שנתיים, כך שבדיקת 10 השנים לא שלמה.`);
-  return { ok: true, rows, last, big5, b5pass, b5consistent, wonderful, hpe, growth, ttm, sticker, fcfPs, payback, tenCap, pbPrice, implied, pe, scenarios, debtYears, tech, verdict, price, warnings };
+  return { ok: true, rows, last, big5, b5pass, b5consistent, b5distorted, b5fragile, wonderful, methods, cheapCount, flags, epsUsed, ttmOdd, hpe, growth, ttm, sticker, fcfPs, payback, tenCap, pbPrice, implied, pe, scenarios, debtYears, tech, verdict, price, warnings };
 }
 
 export function fmtUsd(v) {
